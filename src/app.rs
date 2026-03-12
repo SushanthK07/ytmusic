@@ -335,6 +335,14 @@ impl App {
         }
     }
 
+    pub fn play_next_in_queue(&mut self) {
+        if self.active_panel == Panel::Content && !self.search_results.is_empty() {
+            let track = self.search_results[self.search_result_cursor].clone();
+            self.notify(format!("Playing next: {}", track.title));
+            self.queue.insert(0, track);
+        }
+    }
+
     pub async fn toggle_pause(&mut self) {
         if let Some(ref sender) = self.player_sender {
             let _ = sender.send(PlayerCommand::TogglePause).await;

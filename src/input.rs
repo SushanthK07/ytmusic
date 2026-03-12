@@ -61,6 +61,7 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('r') => app.toggle_repeat(),
 
         KeyCode::Char('a') => app.add_to_queue(),
+        KeyCode::Char('A') => app.play_next_in_queue(),
         KeyCode::Char('d') | KeyCode::Char('x') => app.remove_from_queue(),
 
         _ => {}

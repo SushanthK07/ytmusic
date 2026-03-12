@@ -413,7 +413,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let popup_width = 56.min(area.width.saturating_sub(4));
-    let popup_height = 24.min(area.height.saturating_sub(4));
+    let popup_height = 25.min(area.height.saturating_sub(4));
 
     let popup = centered_rect(popup_width, popup_height, area);
 
@@ -490,7 +490,11 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )]),
         Line::from(vec![
             Span::styled("  a            ", theme::title()),
-            Span::styled("Add selected to queue", theme::secondary()),
+            Span::styled("Add to end of queue", theme::secondary()),
+        ]),
+        Line::from(vec![
+            Span::styled("  A            ", theme::title()),
+            Span::styled("Play next (insert at front)", theme::secondary()),
         ]),
         Line::from(vec![
             Span::styled("  d/x          ", theme::title()),
