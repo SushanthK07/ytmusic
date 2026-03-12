@@ -1,10 +1,12 @@
 mod api;
 mod app;
+mod config;
 mod input;
 mod player;
 mod ui;
 
 use anyhow::Result;
+use config::{KeyBindings, Theme};
 use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -26,6 +28,12 @@ async fn main() -> Result<()> {
 
     check_dependencies();
 
+    let cfg = config::load_config().unwrap_or_default();
+    let theme = Theme::from_config(&cfg.theme);
+    let keybindings = KeyBindings::from_config(&cfg.keybindings);
+    let theme_name = cfg.theme.preset.clone();
+    let volume = cfg.general.volume;
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -33,7 +41,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run(&mut terminal).await;
+    let result = run(&mut terminal, volume, theme, keybindings, theme_name).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -46,13 +54,19 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let mut app = app::App::new().await?;
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    volume: i32,
+    theme: Theme,
+    keybindings: KeyBindings,
+    theme_name: String,
+) -> Result<()> {
+    let mut app = app::App::new(volume, theme, keybindings, theme_name).await?;
     let mut events = EventStream::new();
     let tick_rate = std::time::Duration::from_millis(200);
 
     loop {
-        terminal.draw(|frame| ui::render(frame, &app))?;
+        terminal.draw(|frame| ui::render(frame, &app, &app.theme))?;
 
         let timeout = tokio::time::sleep(tick_rate);
         tokio::pin!(timeout);

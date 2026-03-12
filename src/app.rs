@@ -1,4 +1,5 @@
 use crate::api::{Track, YtMusicClient};
+use crate::config::{self, KeyBindings, Theme, THEME_PRESETS};
 use crate::player::{
     MpvProcess, PlaybackState, PlayerCommand, PlayerEvent, PlayerSender, PlayerStatus,
 };
@@ -28,18 +29,31 @@ pub enum LibraryItem {
     Home,
     Search,
     Queue,
+    Settings,
 }
 
 impl LibraryItem {
-    pub const ALL: [LibraryItem; 3] = [LibraryItem::Home, LibraryItem::Search, LibraryItem::Queue];
+    pub const ALL: [LibraryItem; 4] = [
+        LibraryItem::Home,
+        LibraryItem::Search,
+        LibraryItem::Queue,
+        LibraryItem::Settings,
+    ];
 
     pub fn label(&self) -> &str {
         match self {
             LibraryItem::Home => "Home",
             LibraryItem::Search => "Search",
             LibraryItem::Queue => "Queue",
+            LibraryItem::Settings => "Settings",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingsSection {
+    Theme,
+    Volume,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +106,13 @@ pub struct App {
 
     pub notification: Option<(String, std::time::Instant)>,
 
+    pub theme: Theme,
+    pub keybindings: KeyBindings,
+    pub settings_section: SettingsSection,
+    pub settings_cursor: usize,
+    pub theme_cursor: usize,
+    pub current_theme_name: String,
+
     pub api: YtMusicClient,
     player_sender: Option<PlayerSender>,
     _mpv: Option<MpvProcess>,
@@ -101,7 +122,12 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(
+        initial_volume: i32,
+        theme: Theme,
+        keybindings: KeyBindings,
+        theme_name: String,
+    ) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(256);
 
         let (player_tx, mut player_rx) = mpsc::channel::<PlayerEvent>(256);
@@ -141,11 +167,24 @@ impl App {
             history: Vec::new(),
 
             now_playing: None,
-            player_status: PlayerStatus::default(),
+            player_status: PlayerStatus {
+                volume: initial_volume as i64,
+                ..PlayerStatus::default()
+            },
             shuffle: false,
             repeat: RepeatMode::Off,
 
             notification: None,
+
+            theme,
+            keybindings,
+            settings_section: SettingsSection::Theme,
+            settings_cursor: 0,
+            theme_cursor: THEME_PRESETS
+                .iter()
+                .position(|&p| p == theme_name)
+                .unwrap_or(0),
+            current_theme_name: theme_name,
 
             api: YtMusicClient::new(),
             player_sender: sender,
@@ -487,5 +526,70 @@ impl App {
 
     pub fn selected_library_item(&self) -> LibraryItem {
         LibraryItem::ALL[self.library_cursor]
+    }
+
+    pub fn settings_move_up(&mut self) {
+        match self.settings_section {
+            SettingsSection::Theme => {
+                self.theme_cursor = self.theme_cursor.saturating_sub(1);
+                self.preview_theme();
+            }
+            SettingsSection::Volume => {}
+        }
+    }
+
+    pub fn settings_move_down(&mut self) {
+        match self.settings_section {
+            SettingsSection::Theme => {
+                if self.theme_cursor < THEME_PRESETS.len() - 1 {
+                    self.theme_cursor += 1;
+                }
+                self.preview_theme();
+            }
+            SettingsSection::Volume => {}
+        }
+    }
+
+    fn preview_theme(&mut self) {
+        let name = THEME_PRESETS[self.theme_cursor];
+        self.theme = Theme::from_preset(name);
+    }
+
+    pub fn settings_select(&mut self) {
+        match self.settings_section {
+            SettingsSection::Theme => {
+                let name = THEME_PRESETS[self.theme_cursor];
+                self.theme = Theme::from_preset(name);
+                self.current_theme_name = name.to_string();
+                let _ = config::save_theme_preset(name);
+                self.notify(format!("Theme set to: {}", name));
+            }
+            SettingsSection::Volume => {}
+        }
+    }
+
+    pub fn settings_next_section(&mut self) {
+        self.settings_section = match self.settings_section {
+            SettingsSection::Theme => SettingsSection::Volume,
+            SettingsSection::Volume => SettingsSection::Theme,
+        };
+        self.settings_cursor = match self.settings_section {
+            SettingsSection::Theme => 0,
+            SettingsSection::Volume => 0,
+        };
+    }
+
+    pub fn settings_volume_up(&mut self) {
+        self.player_status.volume = (self.player_status.volume + 5).min(100);
+        let _ = config::save_volume(self.player_status.volume as i32);
+    }
+
+    pub fn settings_volume_down(&mut self) {
+        self.player_status.volume = (self.player_status.volume - 5).max(0);
+        let _ = config::save_volume(self.player_status.volume as i32);
+    }
+
+    pub fn in_settings(&self) -> bool {
+        self.active_panel == Panel::Content && self.selected_library_item() == LibraryItem::Settings
     }
 }
