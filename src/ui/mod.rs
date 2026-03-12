@@ -478,8 +478,8 @@ fn render_favorites(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
         app.favorites_tracks.len(),
     );
 
-    let artist_col = inner_width.saturating_sub(8) / 3;
-    let title_col = inner_width.saturating_sub(artist_col + 10);
+    let artist_col = inner_width.saturating_sub(12) / 3;
+    let title_col = inner_width.saturating_sub(artist_col + 12);
     let now_playing_id = app.now_playing.as_ref().map(|tr| tr.video_id.as_str());
 
     let items: Vec<ListItem> = app
@@ -583,8 +583,8 @@ fn render_playlists(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
             let visible_height = area.height.saturating_sub(2) as usize;
             let offset = scroll_offset(app.playlist_track_cursor, visible_height, tracks.len());
 
-            let artist_col = inner_width.saturating_sub(8) / 3;
-            let title_col = inner_width.saturating_sub(artist_col + 10);
+            let artist_col = inner_width.saturating_sub(12) / 3;
+            let title_col = inner_width.saturating_sub(artist_col + 12);
 
             let items: Vec<ListItem> = tracks
                 .iter()

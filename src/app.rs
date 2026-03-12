@@ -764,6 +764,11 @@ impl App {
                 self.favorites.remove(&track.video_id);
                 self.favorites_tracks
                     .retain(|t| t.video_id != track.video_id);
+                if self.favorites_cursor >= self.favorites_tracks.len()
+                    && !self.favorites_tracks.is_empty()
+                {
+                    self.favorites_cursor = self.favorites_tracks.len() - 1;
+                }
                 self.notify(format!("Unfavorited: {}", track.title));
             } else {
                 self.favorites.insert(track.video_id.clone());

@@ -299,7 +299,7 @@ fn parse_track_item(item: &Value) -> Option<Track> {
             text.get("simpleText")
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
-                .or_else(|| extract_runs_text(text))
+                .or_else(|| text.get("runs").and_then(extract_runs_text))
         })
         .filter(|t| is_duration_str(t));
 

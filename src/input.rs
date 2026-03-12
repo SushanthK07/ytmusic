@@ -99,7 +99,13 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
     } else if bindings.matches(Action::PlayNext, code, mods) {
         app.play_next_in_queue();
     } else if bindings.matches(Action::RemoveFromQueue, code, mods) {
-        app.remove_from_queue();
+        if app.active_panel == Panel::Content
+            && app.selected_library_item() == LibraryItem::Favorites
+        {
+            app.toggle_favorite();
+        } else {
+            app.remove_from_queue();
+        }
     } else if bindings.matches(Action::AddToPlaylist, code, mods) {
         app.open_playlist_picker();
     } else if bindings.matches(Action::ToggleLyrics, code, mods) {
