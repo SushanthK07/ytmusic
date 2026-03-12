@@ -7,22 +7,33 @@ A keyboard-driven terminal UI client for YouTube Music, built in Rust.
 [![CI](https://github.com/SushanthK07/ytmusic/actions/workflows/ci.yml/badge.svg)](https://github.com/SushanthK07/ytmusic/actions/workflows/ci.yml)
 
 ```
-╭─ ytmusic ─────────────────────────────────────────────────────╮
-│ ╭─ Library ────────╮ ╭─ Search ─────────────────────────────╮ │
-│ │                  │ │  Search: radiohead                   │ │
-│ │  > Home          │ │                                      │ │
-│ │    Search        │ │  > Creep          Radiohead    3:58 ♫│ │
-│ │    Queue         │ │    Karma Police   Radiohead    4:22  │ │
-│ │                  │ │    No Surprises   Radiohead    3:49  │ │
-│ ├─ Queue (2) ──────┤ │    Everything..   Radiohead    4:33  │ │
-│ │  1. Paranoid..   │ │                                      │ │
-│ │  2. Fake Pla..   │ │                                      │ │
-│ ╰──────────────────╯ ╰──────────────────────────────────────╯ │
-│  ▶ Creep — Radiohead                           1:23 / 3:58   │
-│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │
-│  space:pause  n/p:next/prev  /:search  ?:help  q:quit        │
-╰───────────────────────────────────────────────────────────────╯
+╭─ ytmusic ─────────────────────────────────────────────────────────────╮
+│ ╭─ Library ────────╮ ╭─ Search ─────────────────────╮ ╭─ Lyrics ───╮ │
+│ │                  │ │  Search: radiohead            │ │            │ │
+│ │  > Home          │ │                               │ │ But I'm a  │ │
+│ │    Search        │ │  > Creep       Radiohead 3:58 │ │ creep      │ │
+│ │    Queue         │ │    Karma..     Radiohead 4:22 │ │ I'm a      │ │
+│ │    Favorites     │ │    No Sur..    Radiohead 3:49 │ │ weirdo     │ │
+│ │    Playlists     │ │    Every..     Radiohead 4:33 │ │            │ │
+│ │    Settings      │ │                               │ │            │ │
+│ ╰──────────────────╯ ╰──────────────────────────────╯ ╰────────────╯ │
+│  ▶ Creep — Radiohead                                  1:23 / 3:58   │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │
+│  space:play/pause  n/p:next/prev  /:search  f:fav  L:lyrics  q:quit │
+╰───────────────────────────────────────────────────────────────────────╯
 ```
+
+## Features
+
+- **Search & play** — search YouTube Music's catalog and stream audio via mpv
+- **Synced lyrics** — real-time lyrics pane with auto-scrolling, powered by LRCLIB
+- **Favorites** — like/unlike tracks, persisted locally
+- **Playlists** — create, browse, and manage local playlists; add tracks from anywhere via picker overlay
+- **Persistent queue** — queue and now-playing state saved across sessions
+- **12 theme presets** — tokyo-night, dracula, gruvbox, nord, rose-pine, kanagawa, everforest, one-dark, solarized, mocha, latte, and default
+- **Custom keybindings** — remap any action via TOML config
+- **In-app settings** — change theme and volume without leaving the TUI
+- **Vim-style navigation** — j/k, g/G, h/l, and all the keys you'd expect
 
 ## Installation
 
@@ -143,14 +154,18 @@ Press `/` to search, `Enter` to play, `?` for help. That's it.
 | `s` | Toggle shuffle |
 | `r` | Cycle repeat (off → all → one) |
 
-### Queue & Search
+### Queue & Library
 
 | Key | Action |
 |-----|--------|
 | `/` | Open search |
 | `a` | Add selected track to queue |
+| `A` | Play next (insert at front of queue) |
 | `d` / `x` | Remove from queue |
-| `Esc` | Cancel search input |
+| `f` | Toggle favorite |
+| `P` | Add track to playlist |
+| `L` | Toggle lyrics pane |
+| `Esc` | Cancel search / go back |
 | `Ctrl+u` | Clear search input |
 | `Ctrl+w` | Delete word in search |
 
@@ -161,23 +176,66 @@ Press `/` to search, `Enter` to play, `?` for help. That's it.
 | `?` | Toggle help overlay |
 | `q` | Quit |
 
+All keybindings can be customized via config file (see [Configuration](#configuration)).
+
+## Configuration
+
+ytmusic uses a TOML config file at `~/.config/ytmusic/config.toml` (auto-created on first run).
+
+```toml
+[general]
+volume = 50
+
+[theme]
+# Presets: "default", "tokyo-night", "dracula", "gruvbox", "nord",
+#          "rose-pine", "kanagawa", "everforest", "one-dark",
+#          "solarized", "mocha", "latte"
+preset = "tokyo-night"
+
+# Override individual colors with hex values:
+# accent = "#ff0000"
+# border_active = "#ff0000"
+
+[keybindings]
+# Override any action: action = "key1, key2"
+# Modifiers: "ctrl+c", "shift+a"
+# quit = "q, ctrl+c"
+# toggle_pause = "space"
+```
+
+Theme and volume can also be changed in-app via the Settings screen.
+
+### Data files
+
+All user data is stored in `~/.config/ytmusic/`:
+
+| File | Contents |
+|------|----------|
+| `config.toml` | Theme, volume, keybindings |
+| `favorites.json` | Favorited track IDs |
+| `playlists.json` | Saved playlists with tracks |
+| `queue.json` | Queue and now-playing state |
+
 ## Architecture
 
 ```
 src/
 ├── main.rs        Entry point, terminal setup, dependency checks
 ├── app.rs         Application state, event loop, business logic
-├── api.rs         YouTube Music InnerTube API client
-├── player.rs      mpv IPC (JSON over Unix socket)
+├── api.rs         YouTube Music InnerTube API + LRCLIB lyrics client
+├── player.rs      mpv IPC (JSON over Unix socket / named pipe)
 ├── input.rs       Keyboard input handling (Normal / Search modes)
+├── config.rs      TOML config, theme presets, keybinding system
+├── storage.rs     JSON persistence (favorites, playlists, queue)
 └── ui/
     ├── mod.rs     Layout and widget rendering
-    └── theme.rs   Color palette
+    └── theme.rs   Style helpers
 ```
 
 - **Event loop** — `tokio::select!` multiplexes terminal input, player events from mpv, API responses, and a tick timer
 - **Search** — Hits YouTube Music's InnerTube API in a background tokio task; results arrive without blocking the UI
-- **Playback** — Controls mpv via JSON IPC over a Unix socket; mpv handles yt-dlp integration internally
+- **Playback** — Controls mpv via JSON IPC over a Unix socket (macOS/Linux) or named pipe (Windows); mpv handles yt-dlp integration internally
+- **Lyrics** — Fetched from LRCLIB (free, no auth); supports synced (LRC) and plain text; displayed as a real-time scrolling pane
 
 ## Building from source
 
