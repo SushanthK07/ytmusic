@@ -3,7 +3,9 @@ use crate::config::{self, KeyBindings, Theme, THEME_PRESETS};
 use crate::player::{
     MpvProcess, PlaybackState, PlayerCommand, PlayerEvent, PlayerSender, PlayerStatus,
 };
+use crate::storage::{self, Playlist};
 use anyhow::Result;
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 
 pub enum AppEvent {
@@ -28,14 +30,18 @@ pub enum Panel {
 pub enum LibraryItem {
     Home,
     Search,
+    Favorites,
+    Playlists,
     Queue,
     Settings,
 }
 
 impl LibraryItem {
-    pub const ALL: [LibraryItem; 4] = [
+    pub const ALL: [LibraryItem; 6] = [
         LibraryItem::Home,
         LibraryItem::Search,
+        LibraryItem::Favorites,
+        LibraryItem::Playlists,
         LibraryItem::Queue,
         LibraryItem::Settings,
     ];
@@ -44,10 +50,19 @@ impl LibraryItem {
         match self {
             LibraryItem::Home => "Home",
             LibraryItem::Search => "Search",
+            LibraryItem::Favorites => "Favorites",
+            LibraryItem::Playlists => "Playlists",
             LibraryItem::Queue => "Queue",
             LibraryItem::Settings => "Settings",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaylistMode {
+    List,
+    View,
+    Create,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,6 +121,23 @@ pub struct App {
 
     pub notification: Option<(String, std::time::Instant)>,
 
+    pub show_playlist_picker: bool,
+    pub playlist_picker_cursor: usize,
+    pub playlist_picker_track: Option<Track>,
+    pub playlist_picker_creating: bool,
+
+    pub favorites: HashSet<String>,
+    pub favorites_tracks: Vec<Track>,
+    pub favorites_cursor: usize,
+
+    pub playlists: Vec<Playlist>,
+    pub playlist_cursor: usize,
+    pub playlist_mode: PlaylistMode,
+    pub viewing_playlist: Option<usize>,
+    pub playlist_track_cursor: usize,
+    pub playlist_name_input: String,
+    pub playlist_name_cursor: usize,
+
     pub theme: Theme,
     pub keybindings: KeyBindings,
     pub settings_section: SettingsSection,
@@ -148,7 +180,7 @@ impl App {
             Err(_) => (None, None),
         };
 
-        Ok(Self {
+        let mut app = Self {
             mode: Mode::Normal,
             active_panel: Panel::Content,
             should_quit: false,
@@ -162,7 +194,10 @@ impl App {
             search_result_cursor: 0,
             is_searching: false,
 
-            queue: Vec::new(),
+            queue: {
+                let saved = storage::load_queue();
+                saved.tracks
+            },
             queue_cursor: 0,
             history: Vec::new(),
 
@@ -175,6 +210,23 @@ impl App {
             repeat: RepeatMode::Off,
 
             notification: None,
+
+            show_playlist_picker: false,
+            playlist_picker_cursor: 0,
+            playlist_picker_track: None,
+            playlist_picker_creating: false,
+
+            favorites: storage::load_favorites(),
+            favorites_tracks: Vec::new(),
+            favorites_cursor: 0,
+
+            playlists: storage::load_playlists(),
+            playlist_cursor: 0,
+            playlist_mode: PlaylistMode::List,
+            viewing_playlist: None,
+            playlist_track_cursor: 0,
+            playlist_name_input: String::new(),
+            playlist_name_cursor: 0,
 
             theme,
             keybindings,
@@ -192,7 +244,10 @@ impl App {
             event_rx,
             event_tx,
             pending_load: None,
-        })
+        };
+
+        app.load_favorites_tracks();
+        Ok(app)
     }
 
     pub async fn tick(&mut self) {
@@ -452,9 +507,21 @@ impl App {
     pub fn move_cursor_up(&mut self) {
         match self.active_panel {
             Panel::Library => self.library_cursor = self.library_cursor.saturating_sub(1),
-            Panel::Content => {
-                self.search_result_cursor = self.search_result_cursor.saturating_sub(1)
-            }
+            Panel::Content => match self.selected_library_item() {
+                LibraryItem::Favorites => {
+                    self.favorites_cursor = self.favorites_cursor.saturating_sub(1)
+                }
+                LibraryItem::Playlists => match self.playlist_mode {
+                    PlaylistMode::List => {
+                        self.playlist_cursor = self.playlist_cursor.saturating_sub(1)
+                    }
+                    PlaylistMode::View => {
+                        self.playlist_track_cursor = self.playlist_track_cursor.saturating_sub(1)
+                    }
+                    PlaylistMode::Create => {}
+                },
+                _ => self.search_result_cursor = self.search_result_cursor.saturating_sub(1),
+            },
             Panel::Queue => self.queue_cursor = self.queue_cursor.saturating_sub(1),
         }
     }
@@ -466,13 +533,43 @@ impl App {
                     self.library_cursor += 1;
                 }
             }
-            Panel::Content => {
-                if !self.search_results.is_empty()
-                    && self.search_result_cursor < self.search_results.len() - 1
-                {
-                    self.search_result_cursor += 1;
+            Panel::Content => match self.selected_library_item() {
+                LibraryItem::Favorites => {
+                    if !self.favorites_tracks.is_empty()
+                        && self.favorites_cursor < self.favorites_tracks.len() - 1
+                    {
+                        self.favorites_cursor += 1;
+                    }
                 }
-            }
+                LibraryItem::Playlists => match self.playlist_mode {
+                    PlaylistMode::List => {
+                        if !self.playlists.is_empty()
+                            && self.playlist_cursor < self.playlists.len() - 1
+                        {
+                            self.playlist_cursor += 1;
+                        }
+                    }
+                    PlaylistMode::View => {
+                        if let Some(idx) = self.viewing_playlist {
+                            if let Some(pl) = self.playlists.get(idx) {
+                                if !pl.tracks.is_empty()
+                                    && self.playlist_track_cursor < pl.tracks.len() - 1
+                                {
+                                    self.playlist_track_cursor += 1;
+                                }
+                            }
+                        }
+                    }
+                    PlaylistMode::Create => {}
+                },
+                _ => {
+                    if !self.search_results.is_empty()
+                        && self.search_result_cursor < self.search_results.len() - 1
+                    {
+                        self.search_result_cursor += 1;
+                    }
+                }
+            },
             Panel::Queue => {
                 if !self.queue.is_empty() && self.queue_cursor < self.queue.len() - 1 {
                     self.queue_cursor += 1;
@@ -484,7 +581,15 @@ impl App {
     pub fn move_cursor_top(&mut self) {
         match self.active_panel {
             Panel::Library => self.library_cursor = 0,
-            Panel::Content => self.search_result_cursor = 0,
+            Panel::Content => match self.selected_library_item() {
+                LibraryItem::Favorites => self.favorites_cursor = 0,
+                LibraryItem::Playlists => match self.playlist_mode {
+                    PlaylistMode::List => self.playlist_cursor = 0,
+                    PlaylistMode::View => self.playlist_track_cursor = 0,
+                    PlaylistMode::Create => {}
+                },
+                _ => self.search_result_cursor = 0,
+            },
             Panel::Queue => self.queue_cursor = 0,
         }
     }
@@ -492,9 +597,25 @@ impl App {
     pub fn move_cursor_bottom(&mut self) {
         match self.active_panel {
             Panel::Library => self.library_cursor = LibraryItem::ALL.len().saturating_sub(1),
-            Panel::Content => {
-                self.search_result_cursor = self.search_results.len().saturating_sub(1)
-            }
+            Panel::Content => match self.selected_library_item() {
+                LibraryItem::Favorites => {
+                    self.favorites_cursor = self.favorites_tracks.len().saturating_sub(1)
+                }
+                LibraryItem::Playlists => match self.playlist_mode {
+                    PlaylistMode::List => {
+                        self.playlist_cursor = self.playlists.len().saturating_sub(1)
+                    }
+                    PlaylistMode::View => {
+                        if let Some(idx) = self.viewing_playlist {
+                            if let Some(pl) = self.playlists.get(idx) {
+                                self.playlist_track_cursor = pl.tracks.len().saturating_sub(1);
+                            }
+                        }
+                    }
+                    PlaylistMode::Create => {}
+                },
+                _ => self.search_result_cursor = self.search_results.len().saturating_sub(1),
+            },
             Panel::Queue => self.queue_cursor = self.queue.len().saturating_sub(1),
         }
     }
@@ -526,6 +647,221 @@ impl App {
 
     pub fn selected_library_item(&self) -> LibraryItem {
         LibraryItem::ALL[self.library_cursor]
+    }
+
+    pub fn toggle_favorite(&mut self) {
+        let track = match self.active_panel {
+            Panel::Content if self.selected_library_item() == LibraryItem::Favorites => {
+                self.favorites_tracks.get(self.favorites_cursor).cloned()
+            }
+            Panel::Content if !self.search_results.is_empty() => {
+                Some(self.search_results[self.search_result_cursor].clone())
+            }
+            Panel::Queue if !self.queue.is_empty() => Some(self.queue[self.queue_cursor].clone()),
+            _ => self.now_playing.clone(),
+        };
+
+        if let Some(track) = track {
+            if self.favorites.contains(&track.video_id) {
+                self.favorites.remove(&track.video_id);
+                self.favorites_tracks
+                    .retain(|t| t.video_id != track.video_id);
+                self.notify(format!("Unfavorited: {}", track.title));
+            } else {
+                self.favorites.insert(track.video_id.clone());
+                self.favorites_tracks.push(track.clone());
+                self.notify(format!("Favorited: {}", track.title));
+            }
+            storage::save_favorites(&self.favorites);
+            self.save_favorites_tracks();
+        }
+    }
+
+    pub fn is_favorited(&self, video_id: &str) -> bool {
+        self.favorites.contains(video_id)
+    }
+
+    fn save_favorites_tracks(&self) {
+        let fav_tracks: Vec<&Track> = self
+            .favorites_tracks
+            .iter()
+            .filter(|t| self.favorites.contains(&t.video_id))
+            .collect();
+        let serialized = serde_json::to_string_pretty(&fav_tracks).unwrap_or_default();
+        let path = crate::config::config_dir().join("favorites_tracks.json");
+        let _ = std::fs::write(path, serialized);
+    }
+
+    pub fn load_favorites_tracks(&mut self) {
+        let path = crate::config::config_dir().join("favorites_tracks.json");
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&content) {
+                    self.favorites_tracks = tracks
+                        .into_iter()
+                        .filter(|t| self.favorites.contains(&t.video_id))
+                        .collect();
+                }
+            }
+        }
+    }
+
+    pub fn create_playlist(&mut self) {
+        let name = self.playlist_name_input.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.playlists.push(Playlist {
+            name: name.clone(),
+            tracks: Vec::new(),
+        });
+        storage::save_playlists(&self.playlists);
+        self.playlist_name_input.clear();
+        self.playlist_name_cursor = 0;
+        self.playlist_mode = PlaylistMode::List;
+        self.notify(format!("Created playlist: {}", name));
+    }
+
+    pub fn delete_playlist(&mut self) {
+        if self.playlist_mode == PlaylistMode::List && !self.playlists.is_empty() {
+            let name = self.playlists[self.playlist_cursor].name.clone();
+            self.playlists.remove(self.playlist_cursor);
+            if self.playlist_cursor >= self.playlists.len() && !self.playlists.is_empty() {
+                self.playlist_cursor = self.playlists.len() - 1;
+            }
+            storage::save_playlists(&self.playlists);
+            self.notify(format!("Deleted playlist: {}", name));
+        }
+    }
+
+    pub fn open_playlist_picker(&mut self) {
+        let track = match self.active_panel {
+            Panel::Content
+                if self.selected_library_item() == LibraryItem::Favorites
+                    && !self.favorites_tracks.is_empty() =>
+            {
+                Some(self.favorites_tracks[self.favorites_cursor].clone())
+            }
+            Panel::Content if !self.search_results.is_empty() => {
+                Some(self.search_results[self.search_result_cursor].clone())
+            }
+            Panel::Queue if !self.queue.is_empty() => Some(self.queue[self.queue_cursor].clone()),
+            _ => self.now_playing.clone(),
+        };
+
+        match track {
+            None => self.notify("No track selected".to_string()),
+            Some(t) => {
+                self.playlist_picker_track = Some(t);
+                self.playlist_picker_cursor = 0;
+                self.playlist_picker_creating = false;
+                self.show_playlist_picker = true;
+            }
+        }
+    }
+
+    pub fn confirm_playlist_picker(&mut self) {
+        if self.playlist_picker_cursor == self.playlists.len() {
+            self.playlist_picker_creating = true;
+            self.playlist_name_input.clear();
+            self.playlist_name_cursor = 0;
+            return;
+        }
+        if let Some(track) = self.playlist_picker_track.take() {
+            let idx = self.playlist_picker_cursor;
+            if idx < self.playlists.len() {
+                let name = self.playlists[idx].name.clone();
+                self.playlists[idx].tracks.push(track.clone());
+                storage::save_playlists(&self.playlists);
+                self.notify(format!("Added to {}: {}", name, track.title));
+            }
+        }
+        self.show_playlist_picker = false;
+    }
+
+    pub fn picker_create_playlist(&mut self) {
+        let name = self.playlist_name_input.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.playlists.push(Playlist {
+            name: name.clone(),
+            tracks: Vec::new(),
+        });
+        let new_idx = self.playlists.len() - 1;
+        if let Some(track) = self.playlist_picker_track.take() {
+            self.playlists[new_idx].tracks.push(track.clone());
+            self.notify(format!("Created '{}' and added: {}", name, track.title));
+        }
+        storage::save_playlists(&self.playlists);
+        self.playlist_name_input.clear();
+        self.playlist_name_cursor = 0;
+        self.playlist_picker_creating = false;
+        self.show_playlist_picker = false;
+    }
+
+    pub fn close_playlist_picker(&mut self) {
+        self.show_playlist_picker = false;
+        self.playlist_picker_track = None;
+        self.playlist_picker_creating = false;
+        self.playlist_name_input.clear();
+        self.playlist_name_cursor = 0;
+    }
+
+    pub fn remove_from_playlist(&mut self) {
+        if let Some(idx) = self.viewing_playlist {
+            if let Some(playlist) = self.playlists.get_mut(idx) {
+                if !playlist.tracks.is_empty() {
+                    playlist.tracks.remove(self.playlist_track_cursor);
+                    if self.playlist_track_cursor >= playlist.tracks.len()
+                        && !playlist.tracks.is_empty()
+                    {
+                        self.playlist_track_cursor = playlist.tracks.len() - 1;
+                    }
+                    storage::save_playlists(&self.playlists);
+                }
+            }
+        }
+    }
+
+    pub async fn play_favorites(&mut self) {
+        if self.favorites_tracks.is_empty() {
+            return;
+        }
+        let track = self.favorites_tracks[self.favorites_cursor].clone();
+        let remaining: Vec<Track> = self
+            .favorites_tracks
+            .iter()
+            .skip(self.favorites_cursor + 1)
+            .cloned()
+            .collect();
+        self.queue = remaining;
+        self.queue_cursor = 0;
+        self.play_track(track).await;
+    }
+
+    pub async fn play_playlist_track(&mut self) {
+        if let Some(idx) = self.viewing_playlist {
+            if let Some(playlist) = self.playlists.get(idx) {
+                if playlist.tracks.is_empty() {
+                    return;
+                }
+                let track = playlist.tracks[self.playlist_track_cursor].clone();
+                let remaining: Vec<Track> = playlist
+                    .tracks
+                    .iter()
+                    .skip(self.playlist_track_cursor + 1)
+                    .cloned()
+                    .collect();
+                self.queue = remaining;
+                self.queue_cursor = 0;
+                self.play_track(track).await;
+            }
+        }
+    }
+
+    pub fn save_queue(&self) {
+        storage::save_queue(&self.queue, &self.now_playing);
     }
 
     pub fn settings_move_up(&mut self) {

@@ -415,6 +415,8 @@ pub enum Action {
     AddToQueue,
     PlayNext,
     RemoveFromQueue,
+    ToggleFavorite,
+    AddToPlaylist,
 }
 
 impl Action {
@@ -442,6 +444,8 @@ impl Action {
             "add_to_queue" => Some(Self::AddToQueue),
             "play_next" => Some(Self::PlayNext),
             "remove_from_queue" => Some(Self::RemoveFromQueue),
+            "toggle_favorite" => Some(Self::ToggleFavorite),
+            "add_to_playlist" => Some(Self::AddToPlaylist),
             _ => None,
         }
     }
@@ -563,6 +567,8 @@ impl KeyBindings {
             Action::RemoveFromQueue,
             vec![bind(KeyCode::Char('d')), bind(KeyCode::Char('x'))],
         );
+        map.insert(Action::ToggleFavorite, vec![bind(KeyCode::Char('f'))]);
+        map.insert(Action::AddToPlaylist, vec![bind_shift(KeyCode::Char('P'))]);
 
         Self { map }
     }

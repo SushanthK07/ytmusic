@@ -1,4 +1,4 @@
-use crate::app::{App, LibraryItem, Mode, Panel, SettingsSection};
+use crate::app::{App, LibraryItem, Mode, Panel, PlaylistMode, SettingsSection};
 use crate::config::Action;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -15,8 +15,16 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
+    if app.show_playlist_picker {
+        return handle_playlist_picker(app, key);
+    }
+
     if app.in_settings() {
         return handle_settings(app, key).await;
+    }
+
+    if app.active_panel == Panel::Content && app.selected_library_item() == LibraryItem::Playlists {
+        return handle_playlists(app, key).await;
     }
 
     let code = &key.code;
@@ -24,6 +32,7 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
     let bindings = app.keybindings.clone();
 
     if bindings.matches(Action::Quit, code, mods) {
+        app.save_queue();
         return true;
     }
 
@@ -43,6 +52,8 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
         app.next_panel();
     } else if bindings.matches(Action::PrevPanel, code, mods) {
         app.prev_panel();
+    } else if bindings.matches(Action::ToggleFavorite, code, mods) {
+        app.toggle_favorite();
     } else if bindings.matches(Action::Select, code, mods) {
         if app.active_panel == Panel::Library {
             match app.selected_library_item() {
@@ -50,7 +61,18 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
                 LibraryItem::Queue => app.active_panel = Panel::Queue,
                 LibraryItem::Home => app.active_panel = Panel::Content,
                 LibraryItem::Settings => app.active_panel = Panel::Content,
+                LibraryItem::Favorites => app.active_panel = Panel::Content,
+                LibraryItem::Playlists => {
+                    app.active_panel = Panel::Content;
+                    app.playlist_mode = PlaylistMode::List;
+                    app.viewing_playlist = None;
+                    app.playlist_track_cursor = 0;
+                }
             }
+        } else if app.active_panel == Panel::Content
+            && app.selected_library_item() == LibraryItem::Favorites
+        {
+            app.play_favorites().await;
         } else {
             app.play_selected().await;
         }
@@ -78,8 +100,51 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
         app.play_next_in_queue();
     } else if bindings.matches(Action::RemoveFromQueue, code, mods) {
         app.remove_from_queue();
+    } else if bindings.matches(Action::AddToPlaylist, code, mods) {
+        app.open_playlist_picker();
     }
 
+    false
+}
+
+fn handle_playlist_picker(app: &mut App, key: KeyEvent) -> bool {
+    if app.playlist_picker_creating {
+        match key.code {
+            KeyCode::Enter => app.picker_create_playlist(),
+            KeyCode::Esc => {
+                app.playlist_picker_creating = false;
+                app.playlist_name_input.clear();
+                app.playlist_name_cursor = 0;
+            }
+            KeyCode::Char(c) => {
+                app.playlist_name_input.insert(app.playlist_name_cursor, c);
+                app.playlist_name_cursor += 1;
+            }
+            KeyCode::Backspace => {
+                if app.playlist_name_cursor > 0 {
+                    app.playlist_name_cursor -= 1;
+                    app.playlist_name_input.remove(app.playlist_name_cursor);
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    let max_cursor = app.playlists.len();
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.playlist_picker_cursor < max_cursor {
+                app.playlist_picker_cursor += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.playlist_picker_cursor = app.playlist_picker_cursor.saturating_sub(1);
+        }
+        KeyCode::Enter => app.confirm_playlist_picker(),
+        KeyCode::Esc | KeyCode::Char('q') => app.close_playlist_picker(),
+        _ => {}
+    }
     false
 }
 
@@ -168,6 +233,86 @@ async fn handle_search(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Home => app.search_cursor = 0,
         KeyCode::End => app.search_cursor = app.search_input.len(),
         _ => {}
+    }
+
+    false
+}
+
+async fn handle_playlists(app: &mut App, key: KeyEvent) -> bool {
+    let code = &key.code;
+    let mods = &key.modifiers;
+    let bindings = app.keybindings.clone();
+
+    if bindings.matches(Action::Quit, code, mods) {
+        app.save_queue();
+        return true;
+    }
+
+    match app.playlist_mode {
+        PlaylistMode::Create => match key.code {
+            KeyCode::Enter => app.create_playlist(),
+            KeyCode::Esc => {
+                app.playlist_name_input.clear();
+                app.playlist_name_cursor = 0;
+                app.playlist_mode = PlaylistMode::List;
+            }
+            KeyCode::Char(c) => {
+                app.playlist_name_input.insert(app.playlist_name_cursor, c);
+                app.playlist_name_cursor += 1;
+            }
+            KeyCode::Backspace => {
+                if app.playlist_name_cursor > 0 {
+                    app.playlist_name_cursor -= 1;
+                    app.playlist_name_input.remove(app.playlist_name_cursor);
+                }
+            }
+            _ => {}
+        },
+        PlaylistMode::View => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.move_cursor_down(),
+            KeyCode::Char('k') | KeyCode::Up => app.move_cursor_up(),
+            KeyCode::Char('g') => app.move_cursor_top(),
+            KeyCode::Char('G') => app.move_cursor_bottom(),
+            KeyCode::Enter => app.play_playlist_track().await,
+            KeyCode::Esc => {
+                app.playlist_mode = PlaylistMode::List;
+                app.viewing_playlist = None;
+                app.playlist_track_cursor = 0;
+            }
+            KeyCode::Char('d') | KeyCode::Char('x') => app.remove_from_playlist(),
+            KeyCode::Char('f') => app.toggle_favorite(),
+            KeyCode::Char('h') | KeyCode::Left => app.prev_panel(),
+            KeyCode::Char('l') | KeyCode::Right => app.next_panel(),
+            KeyCode::Char(' ') => app.toggle_pause().await,
+            KeyCode::Char('?') => app.show_help = true,
+            _ => {}
+        },
+        PlaylistMode::List => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.move_cursor_down(),
+            KeyCode::Char('k') | KeyCode::Up => app.move_cursor_up(),
+            KeyCode::Char('g') => app.move_cursor_top(),
+            KeyCode::Char('G') => app.move_cursor_bottom(),
+            KeyCode::Enter => {
+                if !app.playlists.is_empty() {
+                    app.viewing_playlist = Some(app.playlist_cursor);
+                    app.playlist_track_cursor = 0;
+                    app.playlist_mode = PlaylistMode::View;
+                }
+            }
+            KeyCode::Char('c') => {
+                app.playlist_mode = PlaylistMode::Create;
+                app.playlist_name_input.clear();
+                app.playlist_name_cursor = 0;
+            }
+            KeyCode::Char('d') => app.delete_playlist(),
+            KeyCode::Char('h') | KeyCode::Left => app.prev_panel(),
+            KeyCode::Char('l') | KeyCode::Right => app.next_panel(),
+            KeyCode::Char('/') => app.enter_search(),
+            KeyCode::Char('f') => app.toggle_favorite(),
+            KeyCode::Char(' ') => app.toggle_pause().await,
+            KeyCode::Char('?') => app.show_help = true,
+            _ => {}
+        },
     }
 
     false

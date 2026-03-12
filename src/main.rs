@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod input;
 mod player;
+mod storage;
 mod ui;
 
 use anyhow::Result;
@@ -93,6 +94,7 @@ async fn run(
         }
     }
 
+    app.save_queue();
     Ok(())
 }
 

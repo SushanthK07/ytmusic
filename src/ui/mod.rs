@@ -1,6 +1,6 @@
 pub mod theme;
 
-use crate::app::{App, LibraryItem, Mode, Panel, RepeatMode, SettingsSection};
+use crate::app::{App, LibraryItem, Mode, Panel, PlaylistMode, RepeatMode, SettingsSection};
 use crate::config::{Theme, THEME_PRESETS};
 use crate::player::PlaybackState;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -28,6 +28,10 @@ pub fn render(frame: &mut Frame, app: &App, t: &Theme) {
     render_main(frame, outer[1], app, t);
     render_player_bar(frame, outer[2], app, t);
     render_status_bar(frame, outer[3], app, t);
+
+    if app.show_playlist_picker {
+        render_playlist_picker(frame, area, app, t);
+    }
 
     if app.show_help {
         render_help_overlay(frame, area, t);
@@ -63,7 +67,7 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(4)])
+        .constraints([Constraint::Length(9), Constraint::Min(4)])
         .split(main_layout[0]);
 
     render_library(frame, left[0], app, t);
@@ -159,9 +163,20 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
         theme::inactive_border(t)
     };
 
-    if app.selected_library_item() == LibraryItem::Settings {
-        render_settings(frame, area, app, border_style, t);
-        return;
+    match app.selected_library_item() {
+        LibraryItem::Settings => {
+            render_settings(frame, area, app, border_style, t);
+            return;
+        }
+        LibraryItem::Favorites => {
+            render_favorites(frame, area, app, border_style, t);
+            return;
+        }
+        LibraryItem::Playlists => {
+            render_playlists(frame, area, app, border_style, t);
+            return;
+        }
+        _ => {}
     }
 
     let has_search_bar = app.mode == Mode::Search
@@ -262,6 +277,11 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
 
             let marker = if is_selected { ">" } else { " " };
             let playing_icon = if is_playing { "♫" } else { " " };
+            let fav_icon = if app.is_favorited(&track.video_id) {
+                "♥"
+            } else {
+                " "
+            };
 
             let title_str = truncate(&track.title, title_col);
             let artist_str = truncate(&track.artist, artist_col);
@@ -286,6 +306,7 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
                     theme::secondary(t),
                 ),
                 Span::styled(format!(" {:>6} ", duration), theme::dim(t)),
+                Span::styled(fav_icon, Style::default().fg(t.accent)),
                 Span::styled(playing_icon, Style::default().fg(t.playing_indicator)),
             ]);
 
@@ -325,6 +346,236 @@ fn render_home(frame: &mut Frame, area: Rect, _app: &App, border_style: Style, t
 
     let paragraph = Paragraph::new(welcome).block(block);
     frame.render_widget(paragraph, area);
+}
+
+fn render_favorites(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
+    let title = format!(" Favorites ({}) ", app.favorites_tracks.len());
+    let block = Block::default()
+        .title(title)
+        .title_style(theme::title(t))
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .padding(Padding::horizontal(1));
+
+    if app.favorites_tracks.is_empty() {
+        let empty = Paragraph::new(Span::styled(
+            "  No favorites yet — press f to favorite a track",
+            theme::dim(t),
+        ))
+        .block(block);
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let inner_width = area.width.saturating_sub(4) as usize;
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let offset = scroll_offset(
+        app.favorites_cursor,
+        visible_height,
+        app.favorites_tracks.len(),
+    );
+
+    let artist_col = inner_width.saturating_sub(8) / 3;
+    let title_col = inner_width.saturating_sub(artist_col + 10);
+    let now_playing_id = app.now_playing.as_ref().map(|tr| tr.video_id.as_str());
+
+    let items: Vec<ListItem> = app
+        .favorites_tracks
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible_height)
+        .map(|(i, track)| {
+            let is_selected = i == app.favorites_cursor;
+            let is_playing = now_playing_id == Some(&track.video_id);
+            let marker = if is_selected { ">" } else { " " };
+
+            let line = Line::from(vec![
+                Span::raw(format!(" {} ", marker)),
+                Span::styled(
+                    format!(
+                        "{:<width$}",
+                        truncate(&track.title, title_col),
+                        width = title_col
+                    ),
+                    if is_playing {
+                        Style::default()
+                            .fg(t.playing_indicator)
+                            .add_modifier(Modifier::BOLD)
+                    } else if is_selected {
+                        theme::selected(t)
+                    } else {
+                        Style::default().fg(t.text)
+                    },
+                ),
+                Span::styled(
+                    format!(
+                        " {:<width$}",
+                        truncate(&track.artist, artist_col),
+                        width = artist_col
+                    ),
+                    theme::secondary(t),
+                ),
+                Span::styled(
+                    format!(" {:>6} ", track.duration_text.as_deref().unwrap_or("--:--")),
+                    theme::dim(t),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
+}
+
+fn render_playlists(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
+    match app.playlist_mode {
+        PlaylistMode::Create => {
+            let block = Block::default()
+                .title(" New Playlist ")
+                .title_style(theme::title(t))
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .padding(Padding::new(2, 2, 1, 1));
+
+            let lines = vec![
+                Line::from(Span::styled("Enter playlist name:", theme::secondary(t))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!(" {}_", app.playlist_name_input),
+                    Style::default().fg(t.text),
+                )),
+                Line::from(""),
+                Line::from(Span::styled("Enter: create  Esc: cancel", theme::dim(t))),
+            ];
+            frame.render_widget(Paragraph::new(lines).block(block), area);
+        }
+        PlaylistMode::View => {
+            let (title, tracks) = if let Some(idx) = app.viewing_playlist {
+                if let Some(pl) = app.playlists.get(idx) {
+                    (format!(" {} ({}) ", pl.name, pl.tracks.len()), &pl.tracks)
+                } else {
+                    (" Playlist ".to_string(), &Vec::new() as &Vec<_>)
+                }
+            } else {
+                (" Playlist ".to_string(), &Vec::new() as &Vec<_>)
+            };
+
+            let block = Block::default()
+                .title(title)
+                .title_style(theme::title(t))
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .padding(Padding::horizontal(1));
+
+            if tracks.is_empty() {
+                let empty =
+                    Paragraph::new(Span::styled("  Empty playlist", theme::dim(t))).block(block);
+                frame.render_widget(empty, area);
+                return;
+            }
+
+            let inner_width = area.width.saturating_sub(4) as usize;
+            let visible_height = area.height.saturating_sub(2) as usize;
+            let offset = scroll_offset(app.playlist_track_cursor, visible_height, tracks.len());
+
+            let artist_col = inner_width.saturating_sub(8) / 3;
+            let title_col = inner_width.saturating_sub(artist_col + 10);
+
+            let items: Vec<ListItem> = tracks
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(visible_height)
+                .map(|(i, track)| {
+                    let is_selected = i == app.playlist_track_cursor;
+                    let marker = if is_selected { ">" } else { " " };
+
+                    let line = Line::from(vec![
+                        Span::raw(format!(" {} ", marker)),
+                        Span::styled(
+                            format!(
+                                "{:<width$}",
+                                truncate(&track.title, title_col),
+                                width = title_col
+                            ),
+                            if is_selected {
+                                theme::selected(t)
+                            } else {
+                                Style::default().fg(t.text)
+                            },
+                        ),
+                        Span::styled(
+                            format!(
+                                " {:<width$}",
+                                truncate(&track.artist, artist_col),
+                                width = artist_col
+                            ),
+                            theme::secondary(t),
+                        ),
+                        Span::styled(
+                            format!(" {:>6} ", track.duration_text.as_deref().unwrap_or("--:--")),
+                            theme::dim(t),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                })
+                .collect();
+
+            let list = List::new(items).block(block);
+            frame.render_widget(list, area);
+        }
+        PlaylistMode::List => {
+            let title = format!(" Playlists ({}) ", app.playlists.len());
+            let block = Block::default()
+                .title(title)
+                .title_style(theme::title(t))
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .padding(Padding::horizontal(1));
+
+            if app.playlists.is_empty() {
+                let empty = Paragraph::new(Span::styled(
+                    "  No playlists — press c to create one",
+                    theme::dim(t),
+                ))
+                .block(block);
+                frame.render_widget(empty, area);
+                return;
+            }
+
+            let visible_height = area.height.saturating_sub(2) as usize;
+            let offset = scroll_offset(app.playlist_cursor, visible_height, app.playlists.len());
+
+            let items: Vec<ListItem> = app
+                .playlists
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(visible_height)
+                .map(|(i, pl)| {
+                    let is_selected = i == app.playlist_cursor;
+                    let marker = if is_selected { ">" } else { " " };
+                    let style = if is_selected {
+                        theme::selected(t)
+                    } else {
+                        Style::default().fg(t.text)
+                    };
+                    ListItem::new(format!(
+                        " {} {} ({} tracks)",
+                        marker,
+                        pl.name,
+                        pl.tracks.len()
+                    ))
+                    .style(style)
+                })
+                .collect();
+
+            let list = List::new(items).block(block);
+            frame.render_widget(list, area);
+        }
+    }
 }
 
 fn render_settings(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
@@ -490,7 +741,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let hints = if app.mode == Mode::Search {
         "enter:search  esc:cancel  ctrl+u:clear"
     } else {
-        "space:play/pause  n/p:next/prev  /:search  a:queue  A:next  ?:help  q:quit"
+        "space:play/pause  n/p:next/prev  /:search  a:queue  A:next  f:fav  P:playlist  ?:help  q:quit"
     };
 
     let bar = Line::from(vec![
@@ -504,9 +755,95 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     frame.render_widget(Paragraph::new(bar), area);
 }
 
+fn render_playlist_picker(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let track_name = app
+        .playlist_picker_track
+        .as_ref()
+        .map(|tr| truncate(&tr.title, 30))
+        .unwrap_or_default();
+
+    let extra = if app.playlist_picker_creating { 2 } else { 0 };
+    let list_height = (app.playlists.len() + 1).min(10) as u16;
+    let popup_width = 44.min(area.width.saturating_sub(4));
+    let popup_height = (list_height + 6 + extra as u16).min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Add to Playlist ")
+        .title_style(theme::accent(t))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(theme::active_border(t))
+        .padding(Padding::new(2, 2, 1, 1));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(inner);
+
+    let header = Paragraph::new(vec![
+        Line::from(Span::styled(track_name, Style::default().fg(t.text_dim))),
+        Line::from(""),
+    ]);
+    frame.render_widget(header, chunks[0]);
+
+    let new_pl_idx = app.playlists.len();
+    let mut items: Vec<ListItem> = app
+        .playlists
+        .iter()
+        .enumerate()
+        .map(|(i, pl)| {
+            let marker = if i == app.playlist_picker_cursor {
+                ">"
+            } else {
+                " "
+            };
+            let style = if i == app.playlist_picker_cursor {
+                theme::selected(t)
+            } else {
+                Style::default().fg(t.text)
+            };
+            ListItem::new(format!(
+                " {} {} ({} tracks)",
+                marker,
+                pl.name,
+                pl.tracks.len()
+            ))
+            .style(style)
+        })
+        .collect();
+
+    let new_marker = if app.playlist_picker_cursor == new_pl_idx {
+        ">"
+    } else {
+        " "
+    };
+    let new_style = if app.playlist_picker_cursor == new_pl_idx {
+        theme::selected(t)
+    } else {
+        Style::default().fg(t.accent)
+    };
+    items.push(ListItem::new(format!(" {} + New Playlist", new_marker)).style(new_style));
+
+    if app.playlist_picker_creating {
+        items.push(
+            ListItem::new(format!("     {}_", app.playlist_name_input))
+                .style(Style::default().fg(t.text)),
+        );
+    }
+
+    let list = List::new(items);
+    frame.render_widget(list, chunks[1]);
+}
+
 fn render_help_overlay(frame: &mut Frame, area: Rect, t: &Theme) {
     let popup_width = 56.min(area.width.saturating_sub(4));
-    let popup_height = 25.min(area.height.saturating_sub(4));
+    let popup_height = 32.min(area.height.saturating_sub(4));
 
     let popup = centered_rect(popup_width, popup_height, area);
 
@@ -586,6 +923,27 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, t: &Theme) {
         Line::from(vec![
             Span::styled("  d/x          ", theme::title(t)),
             Span::styled("Remove from queue", theme::secondary(t)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Library",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled("  f            ", theme::title(t)),
+            Span::styled("Toggle favorite", theme::secondary(t)),
+        ]),
+        Line::from(vec![
+            Span::styled("  P            ", theme::title(t)),
+            Span::styled("Add to playlist (picker)", theme::secondary(t)),
+        ]),
+        Line::from(vec![
+            Span::styled("  c            ", theme::title(t)),
+            Span::styled("Create playlist (in Playlists)", theme::secondary(t)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc          ", theme::title(t)),
+            Span::styled("Back to playlist list", theme::secondary(t)),
         ]),
         Line::from(""),
         Line::from(vec![
