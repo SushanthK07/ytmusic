@@ -68,7 +68,10 @@ impl YtMusicClient {
 
         let resp = self
             .http
-            .post(format!("{}/search?key={}&prettyPrint=false", INNERTUBE_URL, API_KEY))
+            .post(format!(
+                "{}/search?key={}&prettyPrint=false",
+                INNERTUBE_URL, API_KEY
+            ))
             .header("Content-Type", "application/json")
             .header("Origin", "https://music.youtube.com")
             .header("Referer", "https://music.youtube.com/")
@@ -108,11 +111,7 @@ impl YtMusicClient {
 fn parse_search_results(data: &Value) -> Vec<Track> {
     let mut tracks = Vec::new();
 
-    let contents = traverse(data, &[
-        "contents",
-        "tabbedSearchResultsRenderer",
-        "tabs",
-    ]);
+    let contents = traverse(data, &["contents", "tabbedSearchResultsRenderer", "tabs"]);
 
     let tabs = match contents.and_then(|v| v.as_array()) {
         Some(t) => t,
@@ -120,12 +119,10 @@ fn parse_search_results(data: &Value) -> Vec<Track> {
     };
 
     for tab in tabs {
-        let sections = traverse(tab, &[
-            "tabRenderer",
-            "content",
-            "sectionListRenderer",
-            "contents",
-        ]);
+        let sections = traverse(
+            tab,
+            &["tabRenderer", "content", "sectionListRenderer", "contents"],
+        );
 
         let sections = match sections.and_then(|v| v.as_array()) {
             Some(s) => s,
@@ -162,15 +159,18 @@ fn parse_track_item(item: &Value) -> Option<Track> {
         .and_then(|p| p.get("videoId"))
         .and_then(|v| v.as_str())
         .or_else(|| {
-            traverse(renderer, &[
-                "overlay",
-                "musicItemThumbnailOverlayRenderer",
-                "content",
-                "musicPlayButtonRenderer",
-                "playNavigationEndpoint",
-                "watchEndpoint",
-                "videoId",
-            ])
+            traverse(
+                renderer,
+                &[
+                    "overlay",
+                    "musicItemThumbnailOverlayRenderer",
+                    "content",
+                    "musicPlayButtonRenderer",
+                    "playNavigationEndpoint",
+                    "watchEndpoint",
+                    "videoId",
+                ],
+            )
             .and_then(|v| v.as_str())
         })?;
 
@@ -179,13 +179,12 @@ fn parse_track_item(item: &Value) -> Option<Track> {
     let title = columns
         .first()
         .and_then(|c| {
-            traverse(c, &[
-                "musicResponsiveListItemFlexColumnRenderer",
-                "text",
-                "runs",
-            ])
+            traverse(
+                c,
+                &["musicResponsiveListItemFlexColumnRenderer", "text", "runs"],
+            )
         })
-        .and_then(|runs| extract_runs_text(runs))
+        .and_then(extract_runs_text)
         .unwrap_or_default();
 
     if title.is_empty() {
@@ -193,11 +192,10 @@ fn parse_track_item(item: &Value) -> Option<Track> {
     }
 
     let subtitle_runs = columns.get(1).and_then(|c| {
-        traverse(c, &[
-            "musicResponsiveListItemFlexColumnRenderer",
-            "text",
-            "runs",
-        ])
+        traverse(
+            c,
+            &["musicResponsiveListItemFlexColumnRenderer", "text", "runs"],
+        )
     });
 
     let (artist, album) = parse_subtitle_runs(subtitle_runs);
@@ -206,27 +204,28 @@ fn parse_track_item(item: &Value) -> Option<Track> {
         .get(2)
         .or(columns.last())
         .and_then(|c| {
-            traverse(c, &[
-                "musicResponsiveListItemFlexColumnRenderer",
-                "text",
-                "runs",
-            ])
+            traverse(
+                c,
+                &["musicResponsiveListItemFlexColumnRenderer", "text", "runs"],
+            )
         })
-        .and_then(|runs| extract_runs_text(runs))
-        .and_then(|t| {
-            if t.contains(':') {
-                Some(t)
-            } else {
-                None
-            }
-        });
+        .and_then(extract_runs_text)
+        .and_then(|t| if t.contains(':') { Some(t) } else { None });
 
-    let thumbnail_url = traverse(renderer, &["thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"])
-        .and_then(|t| t.as_array())
-        .and_then(|arr| arr.last())
-        .and_then(|t| t.get("url"))
-        .and_then(|u| u.as_str())
-        .map(|s| s.to_string());
+    let thumbnail_url = traverse(
+        renderer,
+        &[
+            "thumbnail",
+            "musicThumbnailRenderer",
+            "thumbnail",
+            "thumbnails",
+        ],
+    )
+    .and_then(|t| t.as_array())
+    .and_then(|arr| arr.last())
+    .and_then(|t| t.get("url"))
+    .and_then(|u| u.as_str())
+    .map(|s| s.to_string());
 
     let is_explicit = renderer
         .get("badges")
@@ -273,9 +272,11 @@ fn parse_subtitle_runs(runs_val: Option<&Value>) -> (String, Option<String>) {
         .unwrap_or(&"Unknown")
         .to_string();
 
-    let album = segments.iter().rev().find(|s| {
-        **s != artist && !["Song", "Video", "EP", "Single", "Album"].contains(s)
-    }).map(|s| s.to_string());
+    let album = segments
+        .iter()
+        .rev()
+        .find(|s| **s != artist && !["Song", "Video", "EP", "Single", "Album"].contains(s))
+        .map(|s| s.to_string());
 
     (artist, album)
 }

@@ -197,11 +197,7 @@ fn render_search_input(frame: &mut Frame, area: Rect, app: &App) {
         .padding(Padding::horizontal(1));
 
     let cursor_char = if app.mode == Mode::Search { "_" } else { "" };
-    let display = format!(
-        " {}{}",
-        app.search_input,
-        cursor_char
-    );
+    let display = format!(" {}{}", app.search_input, cursor_char);
 
     let input = Paragraph::new(display)
         .style(Style::default().fg(theme::TEXT))
@@ -284,10 +280,7 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
                     theme::secondary(),
                 ),
                 Span::styled(format!(" {:>6} ", duration), theme::dim()),
-                Span::styled(
-                    playing_icon,
-                    Style::default().fg(theme::PLAYING_INDICATOR),
-                ),
+                Span::styled(playing_icon, Style::default().fg(theme::PLAYING_INDICATOR)),
             ]);
 
             ListItem::new(line)
@@ -323,10 +316,7 @@ fn render_home(frame: &mut Frame, area: Rect, _app: &App, border_style: Style) {
             theme::secondary(),
         )]),
         Line::from(""),
-        Line::from(vec![Span::styled(
-            "Requires: mpv, yt-dlp",
-            theme::dim(),
-        )]),
+        Line::from(vec![Span::styled("Requires: mpv, yt-dlp", theme::dim())]),
     ];
 
     let paragraph = Paragraph::new(welcome).block(block);
@@ -336,22 +326,24 @@ fn render_home(frame: &mut Frame, area: Rect, _app: &App, border_style: Style) {
 fn render_player_bar(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     let (icon, title_line) = match (&app.player_status.state, &app.now_playing) {
-        (PlaybackState::Playing, Some(track)) => (
-            "▶",
-            format!("{} — {}", track.title, track.artist),
-        ),
-        (PlaybackState::Paused, Some(track)) => (
-            "⏸",
-            format!("{} — {}", track.title, track.artist),
-        ),
-        (PlaybackState::Buffering, Some(track)) => (
-            "⟳",
-            format!("Loading: {} — {}", track.title, track.artist),
-        ),
+        (PlaybackState::Playing, Some(track)) => {
+            ("▶", format!("{} — {}", track.title, track.artist))
+        }
+        (PlaybackState::Paused, Some(track)) => {
+            ("⏸", format!("{} — {}", track.title, track.artist))
+        }
+        (PlaybackState::Buffering, Some(track)) => {
+            ("⟳", format!("Loading: {} — {}", track.title, track.artist))
+        }
         _ => ("■", "Not playing".to_string()),
     };
 
@@ -436,9 +428,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         .padding(Padding::new(2, 2, 1, 1));
 
     let help_text = vec![
-        Line::from(vec![
-            Span::styled("Navigation", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Navigation",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  j/k, ↑/↓    ", theme::title()),
             Span::styled("Move cursor up/down", theme::secondary()),
@@ -456,9 +451,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
             Span::styled("Select / play", theme::secondary()),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Playback", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Playback",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  Space        ", theme::title()),
             Span::styled("Play / pause", theme::secondary()),
@@ -484,9 +482,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
             Span::styled("Cycle repeat mode", theme::secondary()),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Queue", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Queue",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  a            ", theme::title()),
             Span::styled("Add selected to queue", theme::secondary()),
@@ -510,7 +511,9 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ]),
     ];
 
-    let paragraph = Paragraph::new(help_text).block(block).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(help_text)
+        .block(block)
+        .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, popup);
 }
 

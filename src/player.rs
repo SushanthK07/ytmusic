@@ -265,10 +265,7 @@ fn parse_mpv_event(json: &Value) -> Option<PlayerEvent> {
     let event_name = json.get("event").and_then(|e| e.as_str())?;
     match event_name {
         "end-file" => {
-            let reason = json
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("");
+            let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("");
             if reason == "eof" {
                 Some(PlayerEvent::TrackEnd)
             } else if reason == "error" {

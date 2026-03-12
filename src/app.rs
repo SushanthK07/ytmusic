@@ -1,5 +1,7 @@
 use crate::api::{Track, YtMusicClient};
-use crate::player::{MpvProcess, PlaybackState, PlayerCommand, PlayerEvent, PlayerSender, PlayerStatus};
+use crate::player::{
+    MpvProcess, PlaybackState, PlayerCommand, PlayerEvent, PlayerSender, PlayerStatus,
+};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -278,10 +280,7 @@ impl App {
         let api = self.api.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result = api
-                .search(&query)
-                .await
-                .map_err(|e| e.to_string());
+            let result = api.search(&query).await.map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::SearchResults(result)).await;
         });
     }
