@@ -142,7 +142,7 @@ impl YtMusicClient {
         let resp = self
             .http
             .get(url)
-            .header("User-Agent", "ytmusic-tui/0.1.0")
+            .header("User-Agent", "ytmusic-tui/0.2.0")
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
