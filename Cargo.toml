@@ -1,0 +1,31 @@
+[package]
+name = "ytmusic-tui"
+version = "0.1.0"
+edition = "2021"
+description = "A keyboard-driven terminal UI client for YouTube Music"
+license = "MIT"
+repository = "https://github.com/SushanthK07/ytmusic"
+keywords = ["youtube", "music", "tui", "terminal", "player"]
+categories = ["command-line-utilities", "multimedia::audio"]
+readme = "README.md"
+
+[[bin]]
+name = "ytmusic"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3"
+dirs = "6"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
