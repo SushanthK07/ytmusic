@@ -102,6 +102,8 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
         app.remove_from_queue();
     } else if bindings.matches(Action::AddToPlaylist, code, mods) {
         app.open_playlist_picker();
+    } else if bindings.matches(Action::ToggleLyrics, code, mods) {
+        app.toggle_lyrics();
     }
 
     false

@@ -108,6 +108,96 @@ impl YtMusicClient {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct LyricsResponse {
+    #[serde(rename = "plainLyrics")]
+    pub plain_lyrics: Option<String>,
+    #[serde(rename = "syncedLyrics")]
+    pub synced_lyrics: Option<String>,
+    pub instrumental: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LyricLine {
+    pub time_ms: u64,
+    pub text: String,
+}
+
+impl YtMusicClient {
+    pub async fn fetch_lyrics(
+        &self,
+        track: &str,
+        artist: &str,
+        duration_secs: Option<u64>,
+    ) -> Result<Option<LyricsResponse>> {
+        let mut url = reqwest::Url::parse("https://lrclib.net/api/get")?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("track_name", track);
+            q.append_pair("artist_name", artist);
+            if let Some(d) = duration_secs {
+                q.append_pair("duration", &d.to_string());
+            }
+        }
+        let resp = self
+            .http
+            .get(url)
+            .header("User-Agent", "ytmusic-tui/0.1.0")
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(resp.json::<LyricsResponse>().await?))
+    }
+}
+
+pub fn parse_synced_lyrics(synced: &str) -> Vec<LyricLine> {
+    let mut lines = Vec::new();
+    for line in synced.lines() {
+        let line = line.trim();
+        if line.len() < 10 || !line.starts_with('[') {
+            continue;
+        }
+        if let Some(bracket_end) = line.find(']') {
+            let timestamp = &line[1..bracket_end];
+            let text = line[bracket_end + 1..].trim().to_string();
+            if let Some(ms) = parse_lrc_timestamp(timestamp) {
+                lines.push(LyricLine { time_ms: ms, text });
+            }
+        }
+    }
+    lines
+}
+
+fn parse_lrc_timestamp(ts: &str) -> Option<u64> {
+    let parts: Vec<&str> = ts.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let mins: f64 = parts[0].parse().ok()?;
+    let secs: f64 = parts[1].parse().ok()?;
+    Some((mins * 60_000.0 + secs * 1000.0) as u64)
+}
+
+pub fn duration_text_to_secs(text: &str) -> Option<u64> {
+    let parts: Vec<&str> = text.split(':').collect();
+    match parts.len() {
+        2 => {
+            let m: u64 = parts[0].parse().ok()?;
+            let s: u64 = parts[1].parse().ok()?;
+            Some(m * 60 + s)
+        }
+        3 => {
+            let h: u64 = parts[0].parse().ok()?;
+            let m: u64 = parts[1].parse().ok()?;
+            let s: u64 = parts[2].parse().ok()?;
+            Some(h * 3600 + m * 60 + s)
+        }
+        _ => None,
+    }
+}
+
 fn parse_search_results(data: &Value) -> Vec<Track> {
     let mut tracks = Vec::new();
 
@@ -198,19 +288,22 @@ fn parse_track_item(item: &Value) -> Option<Track> {
         )
     });
 
-    let (artist, album) = parse_subtitle_runs(subtitle_runs);
+    let (artist, album, duration_from_subtitle) = parse_subtitle_runs(subtitle_runs);
 
-    let duration_text = columns
-        .get(2)
-        .or(columns.last())
-        .and_then(|c| {
-            traverse(
-                c,
-                &["musicResponsiveListItemFlexColumnRenderer", "text", "runs"],
-            )
+    let duration_from_fixed = renderer
+        .get("fixedColumns")
+        .and_then(|fc| fc.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| traverse(c, &["musicResponsiveListItemFixedColumnRenderer", "text"]))
+        .and_then(|text| {
+            text.get("simpleText")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| extract_runs_text(text))
         })
-        .and_then(extract_runs_text)
-        .and_then(|t| if t.contains(':') { Some(t) } else { None });
+        .filter(|t| is_duration_str(t));
+
+    let duration_text = duration_from_fixed.or(duration_from_subtitle);
 
     let thumbnail_url = traverse(
         renderer,
@@ -252,10 +345,19 @@ fn parse_track_item(item: &Value) -> Option<Track> {
     })
 }
 
-fn parse_subtitle_runs(runs_val: Option<&Value>) -> (String, Option<String>) {
+fn is_duration_str(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = s.split(':').collect();
+    parts.len() >= 2 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn parse_subtitle_runs(runs_val: Option<&Value>) -> (String, Option<String>, Option<String>) {
     let runs = match runs_val.and_then(|v| v.as_array()) {
         Some(r) => r,
-        None => return ("Unknown".to_string(), None),
+        None => return ("Unknown".to_string(), None, None),
     };
 
     let text_parts: Vec<&str> = runs
@@ -266,19 +368,29 @@ fn parse_subtitle_runs(runs_val: Option<&Value>) -> (String, Option<String>) {
     let full_text = text_parts.join("");
     let segments: Vec<&str> = full_text.split(" \u{2022} ").collect();
 
-    let artist = segments
-        .iter()
-        .find(|s| !["Song", "Video", "EP", "Single", "Album"].contains(s))
-        .unwrap_or(&"Unknown")
-        .to_string();
-
-    let album = segments
+    let duration = segments
         .iter()
         .rev()
-        .find(|s| **s != artist && !["Song", "Video", "EP", "Single", "Album"].contains(s))
+        .find(|s| is_duration_str(s))
         .map(|s| s.to_string());
 
-    (artist, album)
+    let non_meta: Vec<&&str> = segments
+        .iter()
+        .filter(|s| !["Song", "Video", "EP", "Single", "Album"].contains(s) && !is_duration_str(s))
+        .collect();
+
+    let artist = non_meta
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let album = non_meta
+        .iter()
+        .rev()
+        .find(|s| ***s != artist)
+        .map(|s| s.to_string());
+
+    (artist, album, duration)
 }
 
 fn parse_suggestions(data: &Value) -> Vec<String> {

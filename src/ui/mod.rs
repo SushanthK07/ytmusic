@@ -60,9 +60,19 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
 }
 
 fn render_main(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let constraints = if app.show_lyrics {
+        vec![
+            Constraint::Length(20),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ]
+    } else {
+        vec![Constraint::Length(20), Constraint::Min(30)]
+    };
+
     let main_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(20), Constraint::Min(30)])
+        .constraints(constraints)
         .split(area);
 
     let left = Layout::default()
@@ -73,6 +83,10 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     render_library(frame, left[0], app, t);
     render_queue_panel(frame, left[1], app, t);
     render_content(frame, main_layout[1], app, t);
+
+    if app.show_lyrics {
+        render_lyrics_pane(frame, main_layout[2], app, t);
+    }
 }
 
 fn render_library(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
@@ -252,7 +266,7 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
         return;
     }
 
-    let inner_width = area.width.saturating_sub(4) as usize;
+    let inner_width = area.width.saturating_sub(6) as usize;
     let visible_height = area.height.saturating_sub(2) as usize;
     let offset = scroll_offset(
         app.search_result_cursor,
@@ -260,8 +274,8 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
         app.search_results.len(),
     );
 
-    let artist_col = inner_width.saturating_sub(8) / 3;
-    let title_col = inner_width.saturating_sub(artist_col + 10);
+    let artist_col = inner_width.saturating_sub(16) / 3;
+    let title_col = inner_width.saturating_sub(artist_col + 16);
 
     let now_playing_id = app.now_playing.as_ref().map(|tr| tr.video_id.as_str());
 
@@ -305,9 +319,9 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
                     format!(" {:<width$}", artist_str, width = artist_col),
                     theme::secondary(t),
                 ),
-                Span::styled(format!(" {:>6} ", duration), theme::dim(t)),
-                Span::styled(fav_icon, Style::default().fg(t.accent)),
-                Span::styled(playing_icon, Style::default().fg(t.playing_indicator)),
+                Span::styled(format!(" {:>6}", duration), theme::dim(t)),
+                Span::styled(format!(" {}", fav_icon), Style::default().fg(t.accent)),
+                Span::styled(format!(" {} ", playing_icon), Style::default().fg(t.playing_indicator)),
             ]);
 
             ListItem::new(line)
@@ -318,7 +332,7 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
     frame.render_widget(list, area);
 }
 
-fn render_home(frame: &mut Frame, area: Rect, _app: &App, border_style: Style, t: &Theme) {
+fn render_home(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
     let block = Block::default()
         .title(" Home ")
         .title_style(theme::title(t))
@@ -326,26 +340,115 @@ fn render_home(frame: &mut Frame, area: Rect, _app: &App, border_style: Style, t
         .border_style(border_style)
         .padding(Padding::new(2, 2, 1, 1));
 
-    let welcome = vec![
-        Line::from(vec![Span::styled(
-            "Welcome to ytmusic",
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        )]),
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let has_history = !app.history.is_empty();
+    let history_height = if has_history {
+        (app.history.len().min(8) + 3) as u16
+    } else {
+        0
+    };
+
+    let constraints = if has_history {
+        vec![
+            Constraint::Length(12),
+            Constraint::Length(history_height),
+            Constraint::Min(1),
+        ]
+    } else {
+        vec![Constraint::Length(12), Constraint::Min(1)]
+    };
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let accent_bold = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(t.accent);
+
+    let mut lines = vec![
+        Line::from(Span::styled("♫  ytmusic", accent_bold)),
+        Line::from(Span::styled(
+            "YouTube Music in your terminal",
+            theme::dim(t),
+        )),
         Line::from(""),
-        Line::from(vec![Span::styled(
-            "Press / to search for music",
-            theme::secondary(t),
-        )]),
-        Line::from(vec![Span::styled(
-            "Press ? for keyboard shortcuts",
-            theme::secondary(t),
-        )]),
+        Line::from(Span::styled("Quick Start", theme::secondary(t))),
         Line::from(""),
-        Line::from(vec![Span::styled("Requires: mpv, yt-dlp", theme::dim(t))]),
     ];
 
-    let paragraph = Paragraph::new(welcome).block(block);
-    frame.render_widget(paragraph, area);
+    let shortcuts = [
+        ("/", "Search for music"),
+        ("f", "Toggle favorite"),
+        ("P", "Add to playlist"),
+        ("L", "Show lyrics"),
+        ("?", "All keyboard shortcuts"),
+    ];
+
+    for (key, desc) in &shortcuts {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<4}", key), key_style),
+            Span::styled(*desc, Style::default().fg(t.text)),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), sections[0]);
+
+    if has_history {
+        let mut history_lines = vec![
+            Line::from(Span::styled("Recently Played", theme::secondary(t))),
+            Line::from(""),
+        ];
+
+        let inner_width = inner.width.saturating_sub(2) as usize;
+        let artist_col = inner_width.saturating_sub(6) / 3;
+        let title_col = inner_width.saturating_sub(artist_col + 6);
+
+        for track in app.history.iter().rev().take(8) {
+            history_lines.push(Line::from(vec![
+                Span::styled("  ♫ ", Style::default().fg(t.accent_dim)),
+                Span::styled(
+                    format!(
+                        "{:<width$}",
+                        truncate(&track.title, title_col),
+                        width = title_col
+                    ),
+                    Style::default().fg(t.text),
+                ),
+                Span::styled(
+                    format!(" {}", truncate(&track.artist, artist_col)),
+                    theme::secondary(t),
+                ),
+            ]));
+        }
+
+        frame.render_widget(Paragraph::new(history_lines), sections[1]);
+    }
+
+    let tip_idx = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 30) as usize)
+        .unwrap_or(0);
+
+    let tips = [
+        "Press 'a' on a search result to add it to your queue",
+        "Press 'A' to play a track next in your queue",
+        "Press 's' to toggle shuffle, 'r' to cycle repeat modes",
+        "Navigate panels with Tab or h/l arrow keys",
+        "Press 'g' to jump to top, 'G' to jump to bottom",
+        "Press 'n' for next track, 'p' for previous track",
+        "Use +/- to adjust volume, >/<  to seek 5 seconds",
+    ];
+
+    let tip = tips[tip_idx % tips.len()];
+    let tip_section = sections.last().unwrap();
+    let tip_lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  Tip: {}", tip), theme::dim(t))),
+    ];
+    frame.render_widget(Paragraph::new(tip_lines), *tip_section);
 }
 
 fn render_favorites(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
@@ -701,7 +804,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let now_playing = Line::from(vec![
         Span::styled(format!("  {} ", icon), theme::accent(t)),
         Span::styled(
-            truncate(&title_line, title_width),
+            format!("{:<width$}", truncate(&title_line, title_width), width = title_width),
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -741,7 +844,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let hints = if app.mode == Mode::Search {
         "enter:search  esc:cancel  ctrl+u:clear"
     } else {
-        "space:play/pause  n/p:next/prev  /:search  a:queue  A:next  f:fav  P:playlist  ?:help  q:quit"
+        "space:play/pause  n/p:next/prev  /:search  a:queue  A:next  f:fav  P:playlist  L:lyrics  ?:help  q:quit"
     };
 
     let bar = Line::from(vec![
@@ -753,6 +856,65 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     ]);
 
     frame.render_widget(Paragraph::new(bar), area);
+}
+
+fn render_lyrics_pane(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let title = if app.lyrics_loading {
+        " Lyrics (loading...) ".to_string()
+    } else {
+        " Lyrics ".to_string()
+    };
+
+    let block = Block::default()
+        .title(title)
+        .title_style(theme::title(t))
+        .borders(Borders::ALL)
+        .border_style(theme::active_border(t))
+        .padding(Padding::new(1, 1, 1, 0));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.lyrics_lines.is_empty() && !app.lyrics_loading {
+        let msg = if app.now_playing.is_some() {
+            "No lyrics available"
+        } else {
+            "Play a track to see lyrics"
+        };
+        let empty = Paragraph::new(Span::styled(format!("  {}", msg), theme::dim(t)));
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let visible = inner.height as usize;
+    let current_idx = app.current_lyric_index();
+
+    let scroll_to = if let Some(idx) = current_idx {
+        idx.saturating_sub(visible / 3)
+    } else {
+        app.lyrics_scroll
+    };
+
+    let lines: Vec<Line> = app
+        .lyrics_lines
+        .iter()
+        .enumerate()
+        .skip(scroll_to)
+        .take(visible)
+        .map(|(i, text)| {
+            let is_current = current_idx == Some(i);
+            let style = if is_current {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else if text.is_empty() {
+                Style::default()
+            } else {
+                Style::default().fg(t.text_dim)
+            };
+            Line::from(Span::styled(format!(" {}", text), style))
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_playlist_picker(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
@@ -843,7 +1005,7 @@ fn render_playlist_picker(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
 
 fn render_help_overlay(frame: &mut Frame, area: Rect, t: &Theme) {
     let popup_width = 56.min(area.width.saturating_sub(4));
-    let popup_height = 32.min(area.height.saturating_sub(4));
+    let popup_height = 34.min(area.height.saturating_sub(4));
 
     let popup = centered_rect(popup_width, popup_height, area);
 
@@ -944,6 +1106,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, t: &Theme) {
         Line::from(vec![
             Span::styled("  Esc          ", theme::title(t)),
             Span::styled("Back to playlist list", theme::secondary(t)),
+        ]),
+        Line::from(vec![
+            Span::styled("  L            ", theme::title(t)),
+            Span::styled("Toggle lyrics", theme::secondary(t)),
         ]),
         Line::from(""),
         Line::from(vec![

@@ -1,4 +1,4 @@
-use crate::api::{Track, YtMusicClient};
+use crate::api::{self, LyricLine, LyricsResponse, Track, YtMusicClient};
 use crate::config::{self, KeyBindings, Theme, THEME_PRESETS};
 use crate::player::{
     MpvProcess, PlaybackState, PlayerCommand, PlayerEvent, PlayerSender, PlayerStatus,
@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 pub enum AppEvent {
     Player(PlayerEvent),
     SearchResults(Result<Vec<Track>, String>),
+    LyricsResult(String, Option<LyricsResponse>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,6 +139,13 @@ pub struct App {
     pub playlist_name_input: String,
     pub playlist_name_cursor: usize,
 
+    pub show_lyrics: bool,
+    pub lyrics_lines: Vec<String>,
+    pub synced_lyrics: Vec<LyricLine>,
+    pub lyrics_scroll: usize,
+    pub lyrics_loading: bool,
+    lyrics_video_id: Option<String>,
+
     pub theme: Theme,
     pub keybindings: KeyBindings,
     pub settings_section: SettingsSection,
@@ -228,6 +236,13 @@ impl App {
             playlist_name_input: String::new(),
             playlist_name_cursor: 0,
 
+            show_lyrics: false,
+            lyrics_lines: Vec::new(),
+            synced_lyrics: Vec::new(),
+            lyrics_scroll: 0,
+            lyrics_loading: false,
+            lyrics_video_id: None,
+
             theme,
             keybindings,
             settings_section: SettingsSection::Theme,
@@ -292,6 +307,41 @@ impl App {
                             self.search_results = tracks;
                         }
                         Err(e) => self.notify(format!("Search failed: {}", e)),
+                    }
+                }
+                AppEvent::LyricsResult(video_id, response) => {
+                    if self
+                        .now_playing
+                        .as_ref()
+                        .map(|t| t.video_id == video_id)
+                        .unwrap_or(false)
+                    {
+                        self.lyrics_loading = false;
+                        self.lyrics_scroll = 0;
+                        match response {
+                            Some(lr) if lr.instrumental == Some(true) => {
+                                self.lyrics_lines = vec!["♫ Instrumental".to_string()];
+                                self.synced_lyrics.clear();
+                            }
+                            Some(lr) => {
+                                if let Some(ref synced) = lr.synced_lyrics {
+                                    self.synced_lyrics = api::parse_synced_lyrics(synced);
+                                    self.lyrics_lines =
+                                        self.synced_lyrics.iter().map(|l| l.text.clone()).collect();
+                                } else if let Some(ref plain) = lr.plain_lyrics {
+                                    self.synced_lyrics.clear();
+                                    self.lyrics_lines =
+                                        plain.lines().map(|l| l.to_string()).collect();
+                                } else {
+                                    self.lyrics_lines = vec!["No lyrics available".to_string()];
+                                    self.synced_lyrics.clear();
+                                }
+                            }
+                            None => {
+                                self.lyrics_lines = vec!["No lyrics available".to_string()];
+                                self.synced_lyrics.clear();
+                            }
+                        }
                     }
                 }
             }
@@ -381,6 +431,7 @@ impl App {
 
     pub async fn play_track(&mut self, track: Track) {
         let url = track.youtube_url();
+        self.fetch_lyrics(&track);
         self.now_playing = Some(track.clone());
         self.player_status.state = PlaybackState::Buffering;
         self.player_status.position = 0.0;
@@ -394,6 +445,53 @@ impl App {
         } else {
             self.notify("mpv not available — install mpv and yt-dlp".to_string());
         }
+    }
+
+    fn fetch_lyrics(&mut self, track: &Track) {
+        if self.lyrics_video_id.as_deref() == Some(&track.video_id) {
+            return;
+        }
+        self.lyrics_video_id = Some(track.video_id.clone());
+        self.lyrics_loading = true;
+        self.lyrics_lines.clear();
+        self.synced_lyrics.clear();
+        self.lyrics_scroll = 0;
+
+        let api = self.api.clone();
+        let tx = self.event_tx.clone();
+        let title = track.title.clone();
+        let artist = track.artist.clone();
+        let video_id = track.video_id.clone();
+        let duration = track
+            .duration_text
+            .as_deref()
+            .and_then(api::duration_text_to_secs);
+
+        tokio::spawn(async move {
+            let result = api.fetch_lyrics(&title, &artist, duration).await;
+            let response = result.ok().flatten();
+            let _ = tx.send(AppEvent::LyricsResult(video_id, response)).await;
+        });
+    }
+
+    pub fn toggle_lyrics(&mut self) {
+        self.show_lyrics = !self.show_lyrics;
+    }
+
+    pub fn current_lyric_index(&self) -> Option<usize> {
+        if self.synced_lyrics.is_empty() {
+            return None;
+        }
+        let pos_ms = (self.player_status.position * 1000.0) as u64;
+        let mut idx = 0;
+        for (i, line) in self.synced_lyrics.iter().enumerate() {
+            if line.time_ms <= pos_ms {
+                idx = i;
+            } else {
+                break;
+            }
+        }
+        Some(idx)
     }
 
     pub async fn play_selected(&mut self) {

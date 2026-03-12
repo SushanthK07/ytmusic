@@ -417,6 +417,7 @@ pub enum Action {
     RemoveFromQueue,
     ToggleFavorite,
     AddToPlaylist,
+    ToggleLyrics,
 }
 
 impl Action {
@@ -446,6 +447,7 @@ impl Action {
             "remove_from_queue" => Some(Self::RemoveFromQueue),
             "toggle_favorite" => Some(Self::ToggleFavorite),
             "add_to_playlist" => Some(Self::AddToPlaylist),
+            "toggle_lyrics" => Some(Self::ToggleLyrics),
             _ => None,
         }
     }
@@ -569,6 +571,7 @@ impl KeyBindings {
         );
         map.insert(Action::ToggleFavorite, vec![bind(KeyCode::Char('f'))]);
         map.insert(Action::AddToPlaylist, vec![bind_shift(KeyCode::Char('P'))]);
+        map.insert(Action::ToggleLyrics, vec![bind_shift(KeyCode::Char('L'))]);
 
         Self { map }
     }
@@ -652,7 +655,8 @@ preset = "default"
 #   seek_forward, seek_backward,
 #   volume_up, volume_down,
 #   toggle_shuffle, toggle_repeat,
-#   add_to_queue, play_next, remove_from_queue
+#   add_to_queue, play_next, remove_from_queue,
+#   toggle_favorite, add_to_playlist, toggle_lyrics
 #
 # Examples:
 # quit = "q, ctrl+c"
