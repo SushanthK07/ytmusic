@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -103,10 +102,14 @@ pub struct MpvProcess {
 
 impl MpvProcess {
     pub async fn spawn(event_tx: mpsc::Sender<PlayerEvent>) -> Result<Self> {
-        let socket_path = socket_path();
+        let ipc_arg = ipc_path();
 
-        if tokio::fs::try_exists(&socket_path).await.unwrap_or(false) {
-            let _ = tokio::fs::remove_file(&socket_path).await;
+        #[cfg(unix)]
+        {
+            let socket_path = std::path::PathBuf::from(&ipc_arg);
+            if tokio::fs::try_exists(&socket_path).await.unwrap_or(false) {
+                let _ = tokio::fs::remove_file(&socket_path).await;
+            }
         }
 
         let child = Command::new("mpv")
@@ -114,7 +117,7 @@ impl MpvProcess {
             .arg("--no-video")
             .arg("--no-terminal")
             .arg("--really-quiet")
-            .arg(format!("--input-ipc-server={}", socket_path.display()))
+            .arg(format!("--input-ipc-server={}", ipc_arg))
             .arg("--volume=80")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -122,61 +125,18 @@ impl MpvProcess {
             .context("Failed to start mpv. Is mpv installed?")?;
 
         for _ in 0..50 {
-            if tokio::fs::try_exists(&socket_path).await.unwrap_or(false) {
+            if ipc_ready(&ipc_arg).await {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        let stream = tokio::net::UnixStream::connect(&socket_path)
-            .await
-            .context("Failed to connect to mpv IPC socket")?;
-
-        let (reader, writer) = stream.into_split();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<String>(64);
-
-        tokio::spawn(async move {
-            let mut writer = writer;
-            while let Some(cmd) = cmd_rx.recv().await {
-                let msg = format!("{}\n", cmd);
-                if writer.write_all(msg.as_bytes()).await.is_err() {
-                    break;
-                }
-            }
-        });
-
+        let (cmd_tx, cmd_rx) = mpsc::channel::<String>(64);
         let sender = PlayerSender {
             cmd_tx: cmd_tx.clone(),
         };
 
-        let init_sender = cmd_tx.clone();
-        tokio::spawn(async move {
-            let _ = init_sender
-                .send(r#"{"command":["observe_property",1,"time-pos"]}"#.to_string())
-                .await;
-            let _ = init_sender
-                .send(r#"{"command":["observe_property",2,"duration"]}"#.to_string())
-                .await;
-            let _ = init_sender
-                .send(r#"{"command":["observe_property",3,"pause"]}"#.to_string())
-                .await;
-            let _ = init_sender
-                .send(r#"{"command":["observe_property",4,"idle-active"]}"#.to_string())
-                .await;
-        });
-
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(json) = serde_json::from_str::<Value>(&line) {
-                    if let Some(event) = parse_mpv_event(&json) {
-                        if event_tx.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        spawn_ipc_tasks(&ipc_arg, cmd_rx, cmd_tx.clone(), event_tx).await?;
 
         Ok(Self {
             _child: child,
@@ -185,63 +145,170 @@ impl MpvProcess {
     }
 }
 
-fn parse_mpv_event(json: &Value) -> Option<PlayerEvent> {
-    if let Some(event_name) = json.get("event").and_then(|e| e.as_str()) {
-        return match event_name {
-            "end-file" => {
-                let reason = json
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("");
-                if reason == "eof" {
-                    Some(PlayerEvent::TrackEnd)
-                } else if reason == "error" {
-                    let err = json
-                        .get("file_error")
-                        .and_then(|e| e.as_str())
-                        .unwrap_or("unknown error");
-                    Some(PlayerEvent::Error(err.to_string()))
-                } else {
-                    None
-                }
-            }
-            "property-change" => {
-                let name = json.get("name").and_then(|n| n.as_str())?;
-                match name {
-                    "time-pos" => {
-                        let pos = json.get("data").and_then(|d| d.as_f64()).unwrap_or(0.0);
-                        Some(PlayerEvent::Position(pos))
-                    }
-                    "duration" => {
-                        let dur = json.get("data").and_then(|d| d.as_f64()).unwrap_or(0.0);
-                        Some(PlayerEvent::Duration(dur))
-                    }
-                    "pause" => {
-                        let paused =
-                            json.get("data").and_then(|d| d.as_bool()).unwrap_or(false);
-                        Some(PlayerEvent::Paused(paused))
-                    }
-                    "idle-active" => {
-                        let idle =
-                            json.get("data").and_then(|d| d.as_bool()).unwrap_or(false);
-                        if idle {
-                            Some(PlayerEvent::Idle)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-    }
-    None
+#[cfg(unix)]
+async fn ipc_ready(path: &str) -> bool {
+    tokio::fs::try_exists(path).await.unwrap_or(false)
 }
 
-fn socket_path() -> PathBuf {
+#[cfg(windows)]
+async fn ipc_ready(path: &str) -> bool {
+    tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(path)
+        .is_ok()
+}
+
+#[cfg(unix)]
+fn ipc_path() -> String {
     let dir = std::env::temp_dir();
     dir.join(format!("ytmusic-mpv-{}.sock", std::process::id()))
+        .display()
+        .to_string()
+}
+
+#[cfg(windows)]
+fn ipc_path() -> String {
+    format!(r"\\.\pipe\ytmusic-mpv-{}", std::process::id())
+}
+
+#[cfg(unix)]
+async fn spawn_ipc_tasks(
+    path: &str,
+    mut cmd_rx: mpsc::Receiver<String>,
+    init_tx: mpsc::Sender<String>,
+    event_tx: mpsc::Sender<PlayerEvent>,
+) -> Result<()> {
+    let stream = tokio::net::UnixStream::connect(path)
+        .await
+        .context("Failed to connect to mpv IPC socket")?;
+
+    let (reader, mut writer) = stream.into_split();
+
+    tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            let msg = format!("{}\n", cmd);
+            if writer.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    send_observe_commands(init_tx).await;
+    spawn_reader_task(BufReader::new(reader), event_tx);
+
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn spawn_ipc_tasks(
+    path: &str,
+    mut cmd_rx: mpsc::Receiver<String>,
+    init_tx: mpsc::Sender<String>,
+    event_tx: mpsc::Sender<PlayerEvent>,
+) -> Result<()> {
+    let pipe = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(path)
+        .context("Failed to connect to mpv named pipe")?;
+
+    let (reader, mut writer) = tokio::io::split(pipe);
+
+    tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            let msg = format!("{}\n", cmd);
+            if writer.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    send_observe_commands(init_tx).await;
+    spawn_reader_task(BufReader::new(reader), event_tx);
+
+    Ok(())
+}
+
+async fn send_observe_commands(tx: mpsc::Sender<String>) {
+    tokio::spawn(async move {
+        let _ = tx
+            .send(r#"{"command":["observe_property",1,"time-pos"]}"#.to_string())
+            .await;
+        let _ = tx
+            .send(r#"{"command":["observe_property",2,"duration"]}"#.to_string())
+            .await;
+        let _ = tx
+            .send(r#"{"command":["observe_property",3,"pause"]}"#.to_string())
+            .await;
+        let _ = tx
+            .send(r#"{"command":["observe_property",4,"idle-active"]}"#.to_string())
+            .await;
+    });
+}
+
+fn spawn_reader_task<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    reader: BufReader<R>,
+    event_tx: mpsc::Sender<PlayerEvent>,
+) {
+    tokio::spawn(async move {
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(json) = serde_json::from_str::<Value>(&line) {
+                if let Some(event) = parse_mpv_event(&json) {
+                    if event_tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn parse_mpv_event(json: &Value) -> Option<PlayerEvent> {
+    let event_name = json.get("event").and_then(|e| e.as_str())?;
+    match event_name {
+        "end-file" => {
+            let reason = json
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("");
+            if reason == "eof" {
+                Some(PlayerEvent::TrackEnd)
+            } else if reason == "error" {
+                let err = json
+                    .get("file_error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown error");
+                Some(PlayerEvent::Error(err.to_string()))
+            } else {
+                None
+            }
+        }
+        "property-change" => {
+            let name = json.get("name").and_then(|n| n.as_str())?;
+            match name {
+                "time-pos" => {
+                    let pos = json.get("data").and_then(|d| d.as_f64()).unwrap_or(0.0);
+                    Some(PlayerEvent::Position(pos))
+                }
+                "duration" => {
+                    let dur = json.get("data").and_then(|d| d.as_f64()).unwrap_or(0.0);
+                    Some(PlayerEvent::Duration(dur))
+                }
+                "pause" => {
+                    let paused = json.get("data").and_then(|d| d.as_bool()).unwrap_or(false);
+                    Some(PlayerEvent::Paused(paused))
+                }
+                "idle-active" => {
+                    let idle = json.get("data").and_then(|d| d.as_bool()).unwrap_or(false);
+                    if idle {
+                        Some(PlayerEvent::Idle)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn escape_json_string(s: &str) -> String {
