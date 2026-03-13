@@ -94,3 +94,41 @@ pub fn save_queue(queue: &[Track], now_playing: &Option<Track>) {
         serde_json::to_string_pretty(&saved).unwrap_or_default(),
     );
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub track: Track,
+    pub played_at: u64,
+}
+
+fn history_path() -> PathBuf {
+    config_dir().join("history.json")
+}
+
+const MAX_HISTORY: usize = 500;
+
+pub fn load_history() -> Vec<HistoryEntry> {
+    let path = history_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_history(entries: &[HistoryEntry]) {
+    if let Some(parent) = history_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let trimmed: &[HistoryEntry] = if entries.len() > MAX_HISTORY {
+        &entries[entries.len() - MAX_HISTORY..]
+    } else {
+        entries
+    };
+    let _ = std::fs::write(
+        history_path(),
+        serde_json::to_string_pretty(trimmed).unwrap_or_default(),
+    );
+}

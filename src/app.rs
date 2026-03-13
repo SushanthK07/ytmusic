@@ -1,17 +1,31 @@
-use crate::api::{self, LyricLine, LyricsResponse, Track, YtMusicClient};
+use crate::api::{
+    self, BrowseItem, BrowseSection, LyricLine, LyricsResponse, Track, YtMusicClient,
+};
+use crate::cache::AudioCache;
 use crate::config::{self, KeyBindings, Theme, THEME_PRESETS};
 use crate::player::{
     MpvProcess, PlaybackState, PlayerCommand, PlayerEvent, PlayerSender, PlayerStatus,
 };
-use crate::storage::{self, Playlist};
+use crate::storage::{self, HistoryEntry, Playlist};
 use anyhow::Result;
+use ratatui::layout::Rect;
 use std::collections::HashSet;
+use std::process::Stdio;
 use tokio::sync::mpsc;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 pub enum AppEvent {
     Player(PlayerEvent),
     SearchResults(Result<Vec<Track>, String>),
     LyricsResult(String, Option<LyricsResponse>),
+    BrowseResult(Result<Vec<BrowseSection>, String>),
+    CacheReady(String, u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +45,8 @@ pub enum Panel {
 pub enum LibraryItem {
     Home,
     Search,
+    Explore,
+    History,
     Favorites,
     Playlists,
     Queue,
@@ -38,9 +54,11 @@ pub enum LibraryItem {
 }
 
 impl LibraryItem {
-    pub const ALL: [LibraryItem; 6] = [
+    pub const ALL: [LibraryItem; 8] = [
         LibraryItem::Home,
         LibraryItem::Search,
+        LibraryItem::Explore,
+        LibraryItem::History,
         LibraryItem::Favorites,
         LibraryItem::Playlists,
         LibraryItem::Queue,
@@ -51,12 +69,24 @@ impl LibraryItem {
         match self {
             LibraryItem::Home => "Home",
             LibraryItem::Search => "Search",
+            LibraryItem::Explore => "Explore",
+            LibraryItem::History => "History",
             LibraryItem::Favorites => "Favorites",
             LibraryItem::Playlists => "Playlists",
             LibraryItem::Queue => "Queue",
             LibraryItem::Settings => "Settings",
         }
     }
+}
+
+#[derive(Default, Clone)]
+pub struct LayoutAreas {
+    pub library: Rect,
+    pub content: Rect,
+    pub queue: Rect,
+    pub player_bar: Rect,
+    pub progress_bar: Rect,
+    pub lyrics: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -113,7 +143,8 @@ pub struct App {
 
     pub queue: Vec<Track>,
     pub queue_cursor: usize,
-    pub history: Vec<Track>,
+    pub history: Vec<HistoryEntry>,
+    pub history_cursor: usize,
 
     pub now_playing: Option<Track>,
     pub player_status: PlayerStatus,
@@ -153,11 +184,25 @@ pub struct App {
     pub theme_cursor: usize,
     pub current_theme_name: String,
 
+    pub explore_sections: Vec<BrowseSection>,
+    pub explore_section_cursor: usize,
+    pub explore_item_cursor: usize,
+    pub explore_loading: bool,
+    pub explore_loaded: bool,
+    pub explore_depth: Vec<(String, Vec<BrowseSection>)>,
+
+    pub layout_areas: LayoutAreas,
+
+    pub cache: AudioCache,
+    pub cache_enabled: bool,
+    gapless: bool,
+    prefetched_video_id: Option<String>,
+
     pub api: YtMusicClient,
     player_sender: Option<PlayerSender>,
     _mpv: Option<MpvProcess>,
     event_rx: mpsc::Receiver<AppEvent>,
-    event_tx: mpsc::Sender<AppEvent>,
+    pub event_tx: mpsc::Sender<AppEvent>,
     pending_load: Option<String>,
 }
 
@@ -167,6 +212,9 @@ impl App {
         theme: Theme,
         keybindings: KeyBindings,
         theme_name: String,
+        cfg_gapless: bool,
+        cfg_cache_enabled: bool,
+        cfg_cache_max: u64,
     ) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(256);
 
@@ -207,7 +255,8 @@ impl App {
                 saved.tracks
             },
             queue_cursor: 0,
-            history: Vec::new(),
+            history: storage::load_history(),
+            history_cursor: 0,
 
             now_playing: None,
             player_status: PlayerStatus {
@@ -252,6 +301,20 @@ impl App {
                 .position(|&p| p == theme_name)
                 .unwrap_or(0),
             current_theme_name: theme_name,
+
+            explore_sections: Vec::new(),
+            explore_section_cursor: 0,
+            explore_item_cursor: 0,
+            explore_loading: false,
+            explore_loaded: false,
+            explore_depth: Vec::new(),
+
+            layout_areas: LayoutAreas::default(),
+
+            cache: AudioCache::new(cfg_cache_max),
+            cache_enabled: cfg_cache_enabled,
+            gapless: cfg_gapless,
+            prefetched_video_id: None,
 
             api: YtMusicClient::new(),
             player_sender: sender,
@@ -344,6 +407,20 @@ impl App {
                         }
                     }
                 }
+                AppEvent::BrowseResult(result) => {
+                    self.explore_loading = false;
+                    match result {
+                        Ok(sections) => {
+                            self.explore_sections = sections;
+                            self.explore_section_cursor = 0;
+                            self.explore_item_cursor = 0;
+                        }
+                        Err(e) => self.notify(format!("Browse failed: {}", e)),
+                    }
+                }
+                AppEvent::CacheReady(video_id, size_bytes) => {
+                    self.cache.register(&video_id, size_bytes);
+                }
             }
         }
     }
@@ -351,18 +428,43 @@ impl App {
     fn on_track_end(&mut self) {
         match self.repeat {
             RepeatMode::One => {
-                if let Some(track) = &self.now_playing {
-                    self.pending_load = Some(track.youtube_url());
+                if let Some(track) = self.now_playing.clone() {
+                    self.pending_load = Some(self.resolve_track_url(&track));
                 }
             }
-            _ => self.advance_queue(),
+            _ => {
+                if self.prefetched_video_id.is_some() {
+                    self.advance_prefetched();
+                } else {
+                    self.advance_queue();
+                }
+            }
         }
+    }
+
+    fn advance_prefetched(&mut self) {
+        let prefetch_id = self.prefetched_video_id.take();
+        if self.queue.is_empty() {
+            self.advance_queue();
+            return;
+        }
+        let idx = self
+            .queue
+            .iter()
+            .position(|t| Some(&t.video_id) == prefetch_id.as_ref())
+            .unwrap_or(0);
+        let track = self.queue.remove(idx);
+        self.now_playing = Some(track.clone());
+        self.player_status.state = PlaybackState::Playing;
+        self.player_status.position = 0.0;
+        self.player_status.duration = 0.0;
+        self.push_history(track);
     }
 
     fn advance_queue(&mut self) {
         if self.queue.is_empty() {
             if self.repeat == RepeatMode::All && !self.history.is_empty() {
-                self.queue = self.history.clone();
+                self.queue = self.history.iter().map(|h| h.track.clone()).collect();
             } else {
                 self.player_status.state = PlaybackState::Stopped;
                 self.now_playing = None;
@@ -381,12 +483,29 @@ impl App {
             self.queue.remove(0)
         };
 
-        self.pending_load = Some(track.youtube_url());
+        self.pending_load = Some(self.resolve_track_url(&track));
         self.now_playing = Some(track.clone());
         self.player_status.state = PlaybackState::Buffering;
         self.player_status.position = 0.0;
         self.player_status.duration = 0.0;
-        self.history.push(track);
+        self.push_history(track);
+    }
+
+    fn push_history(&mut self, track: Track) {
+        self.history.retain(|h| h.track.video_id != track.video_id);
+        self.history.push(HistoryEntry {
+            track,
+            played_at: unix_now(),
+        });
+    }
+
+    fn resolve_track_url(&mut self, track: &Track) -> String {
+        if self.cache_enabled {
+            if let Some(path) = self.cache.lookup(&track.video_id) {
+                return path.to_string_lossy().to_string();
+            }
+        }
+        track.youtube_url()
     }
 
     fn clear_stale_notification(&mut self) {
@@ -430,13 +549,15 @@ impl App {
     }
 
     pub async fn play_track(&mut self, track: Track) {
-        let url = track.youtube_url();
+        let url = self.resolve_track_url(&track);
         self.fetch_lyrics(&track);
+        self.prefetched_video_id = None;
         self.now_playing = Some(track.clone());
         self.player_status.state = PlaybackState::Buffering;
         self.player_status.position = 0.0;
         self.player_status.duration = 0.0;
-        self.history.push(track);
+        self.push_history(track.clone());
+        self.spawn_cache_download(&track);
 
         if let Some(ref sender) = self.player_sender {
             if let Err(e) = sender.send(PlayerCommand::Load(url)).await {
@@ -445,6 +566,42 @@ impl App {
         } else {
             self.notify("mpv not available — install mpv and yt-dlp".to_string());
         }
+    }
+
+    fn spawn_cache_download(&self, track: &Track) {
+        if !self.cache_enabled {
+            return;
+        }
+        if self.cache.lookup_exists(&track.video_id) {
+            return;
+        }
+        let tx = self.event_tx.clone();
+        let video_id = track.video_id.clone();
+        let yt_url = track.youtube_url();
+        let cache_path = self.cache.cache_path_for(&video_id);
+
+        tokio::spawn(async move {
+            let status = tokio::process::Command::new("yt-dlp")
+                .arg("-x")
+                .arg("--audio-format")
+                .arg("opus")
+                .arg("-o")
+                .arg(cache_path.to_string_lossy().as_ref())
+                .arg(&yt_url)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            if let Ok(s) = status {
+                if s.success() {
+                    let size = tokio::fs::metadata(&cache_path)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    let _ = tx.send(AppEvent::CacheReady(video_id, size)).await;
+                }
+            }
+        });
     }
 
     fn fetch_lyrics(&mut self, track: &Track) {
@@ -496,18 +653,27 @@ impl App {
 
     pub async fn play_selected(&mut self) {
         match self.active_panel {
-            Panel::Content if !self.search_results.is_empty() => {
-                let track = self.search_results[self.search_result_cursor].clone();
-                let remaining: Vec<Track> = self
-                    .search_results
-                    .iter()
-                    .skip(self.search_result_cursor + 1)
-                    .cloned()
-                    .collect();
-                self.queue = remaining;
-                self.queue_cursor = 0;
-                self.play_track(track).await;
-            }
+            Panel::Content => match self.selected_library_item() {
+                LibraryItem::History => {
+                    self.play_history_track().await;
+                }
+                LibraryItem::Explore => {
+                    self.play_explore_selected().await;
+                }
+                _ if !self.search_results.is_empty() => {
+                    let track = self.search_results[self.search_result_cursor].clone();
+                    let remaining: Vec<Track> = self
+                        .search_results
+                        .iter()
+                        .skip(self.search_result_cursor + 1)
+                        .cloned()
+                        .collect();
+                    self.queue = remaining;
+                    self.queue_cursor = 0;
+                    self.play_track(track).await;
+                }
+                _ => {}
+            },
             Panel::Queue if !self.queue.is_empty() => {
                 let track = self.queue.remove(self.queue_cursor);
                 if self.queue_cursor >= self.queue.len() && !self.queue.is_empty() {
@@ -516,6 +682,22 @@ impl App {
                 self.play_track(track).await;
             }
             _ => {}
+        }
+    }
+
+    async fn play_explore_selected(&mut self) {
+        let item = self.explore_current_item().cloned();
+        match item {
+            Some(BrowseItem::Track(track)) => {
+                self.play_track(track).await;
+            }
+            Some(BrowseItem::PlaylistCard { browse_id, .. }) => {
+                self.browse_into(&browse_id, None);
+            }
+            Some(BrowseItem::Category { browse_id, .. }) => {
+                self.browse_into(&browse_id, None);
+            }
+            None => {}
         }
     }
 
@@ -555,9 +737,9 @@ impl App {
         }
 
         self.history.pop();
-        if let Some(track) = self.history.last().cloned() {
-            self.pending_load = Some(track.youtube_url());
-            self.now_playing = Some(track);
+        if let Some(entry) = self.history.last().cloned() {
+            self.pending_load = Some(self.resolve_track_url(&entry.track));
+            self.now_playing = Some(entry.track);
             self.player_status.state = PlaybackState::Buffering;
             self.player_status.position = 0.0;
         }
@@ -609,6 +791,19 @@ impl App {
                 LibraryItem::Favorites => {
                     self.favorites_cursor = self.favorites_cursor.saturating_sub(1)
                 }
+                LibraryItem::History => self.history_cursor = self.history_cursor.saturating_sub(1),
+                LibraryItem::Explore => {
+                    if self.explore_item_cursor > 0 {
+                        self.explore_item_cursor -= 1;
+                    } else if self.explore_section_cursor > 0 {
+                        self.explore_section_cursor -= 1;
+                        self.explore_item_cursor = self
+                            .explore_sections
+                            .get(self.explore_section_cursor)
+                            .map(|s| s.items.len().saturating_sub(1))
+                            .unwrap_or(0);
+                    }
+                }
                 LibraryItem::Playlists => match self.playlist_mode {
                     PlaylistMode::List => {
                         self.playlist_cursor = self.playlist_cursor.saturating_sub(1)
@@ -637,6 +832,22 @@ impl App {
                         && self.favorites_cursor < self.favorites_tracks.len() - 1
                     {
                         self.favorites_cursor += 1;
+                    }
+                }
+                LibraryItem::History => {
+                    if !self.history.is_empty() && self.history_cursor < self.history.len() - 1 {
+                        self.history_cursor += 1;
+                    }
+                }
+                LibraryItem::Explore => {
+                    let total = self.explore_total_items();
+                    if total > 0 && self.explore_item_cursor < total - 1 {
+                        self.explore_item_cursor += 1;
+                    } else if self.explore_section_cursor
+                        < self.explore_sections.len().saturating_sub(1)
+                    {
+                        self.explore_section_cursor += 1;
+                        self.explore_item_cursor = 0;
                     }
                 }
                 LibraryItem::Playlists => match self.playlist_mode {
@@ -681,6 +892,11 @@ impl App {
             Panel::Library => self.library_cursor = 0,
             Panel::Content => match self.selected_library_item() {
                 LibraryItem::Favorites => self.favorites_cursor = 0,
+                LibraryItem::History => self.history_cursor = 0,
+                LibraryItem::Explore => {
+                    self.explore_section_cursor = 0;
+                    self.explore_item_cursor = 0;
+                }
                 LibraryItem::Playlists => match self.playlist_mode {
                     PlaylistMode::List => self.playlist_cursor = 0,
                     PlaylistMode::View => self.playlist_track_cursor = 0,
@@ -698,6 +914,15 @@ impl App {
             Panel::Content => match self.selected_library_item() {
                 LibraryItem::Favorites => {
                     self.favorites_cursor = self.favorites_tracks.len().saturating_sub(1)
+                }
+                LibraryItem::History => self.history_cursor = self.history.len().saturating_sub(1),
+                LibraryItem::Explore => {
+                    self.explore_section_cursor = self.explore_sections.len().saturating_sub(1);
+                    self.explore_item_cursor = self
+                        .explore_sections
+                        .last()
+                        .map(|s| s.items.len().saturating_sub(1))
+                        .unwrap_or(0);
                 }
                 LibraryItem::Playlists => match self.playlist_mode {
                     PlaylistMode::List => {
@@ -1030,5 +1255,113 @@ impl App {
 
     pub fn in_settings(&self) -> bool {
         self.active_panel == Panel::Content && self.selected_library_item() == LibraryItem::Settings
+    }
+
+    pub async fn seek_to(&mut self, position: f64) {
+        if let Some(ref sender) = self.player_sender {
+            let _ = sender.send(PlayerCommand::SeekAbsolute(position)).await;
+        }
+    }
+
+    pub fn save_history(&self) {
+        storage::save_history(&self.history);
+    }
+
+    pub fn load_explore(&mut self) {
+        if self.explore_loaded || self.explore_loading {
+            return;
+        }
+        self.explore_loading = true;
+        let api = self.api.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = api
+                .browse("FEmusic_explore")
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::BrowseResult(result)).await;
+        });
+    }
+
+    pub fn browse_into(&mut self, browse_id: &str, _params: Option<&str>) {
+        self.explore_depth.push((
+            browse_id.to_string(),
+            std::mem::take(&mut self.explore_sections),
+        ));
+        self.explore_loading = true;
+        self.explore_section_cursor = 0;
+        self.explore_item_cursor = 0;
+
+        let api = self.api.clone();
+        let tx = self.event_tx.clone();
+        let bid = browse_id.to_string();
+        tokio::spawn(async move {
+            let result = api.browse(&bid).await.map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::BrowseResult(result)).await;
+        });
+    }
+
+    pub fn browse_back(&mut self) {
+        if let Some((_id, sections)) = self.explore_depth.pop() {
+            self.explore_sections = sections;
+            self.explore_section_cursor = 0;
+            self.explore_item_cursor = 0;
+        }
+    }
+
+    pub fn maybe_prefetch_next(&mut self) {
+        if !self.gapless || self.shuffle || self.prefetched_video_id.is_some() {
+            return;
+        }
+        if self.player_status.duration <= 0.0 {
+            return;
+        }
+        let remaining = self.player_status.duration - self.player_status.position;
+        if remaining > 10.0 || remaining <= 0.0 {
+            return;
+        }
+        if let Some(next_track) = self.queue.first().cloned() {
+            let url = self.resolve_track_url(&next_track);
+            let vid = next_track.video_id.clone();
+            if let Some(ref sender) = self.player_sender {
+                let sender = sender.clone();
+                let cmd = PlayerCommand::LoadAppend(url);
+                tokio::spawn(async move {
+                    let _ = sender.send(cmd).await;
+                });
+            }
+            self.prefetched_video_id = Some(vid);
+        }
+    }
+
+    pub async fn play_history_track(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let entry = self.history
+            [self.history.len() - 1 - self.history_cursor.min(self.history.len() - 1)]
+        .clone();
+        let remaining: Vec<Track> = self
+            .history
+            .iter()
+            .rev()
+            .skip(self.history_cursor + 1)
+            .map(|h| h.track.clone())
+            .collect();
+        self.queue = remaining;
+        self.queue_cursor = 0;
+        self.play_track(entry.track).await;
+    }
+
+    pub fn explore_current_item(&self) -> Option<&BrowseItem> {
+        let section = self.explore_sections.get(self.explore_section_cursor)?;
+        section.items.get(self.explore_item_cursor)
+    }
+
+    pub fn explore_total_items(&self) -> usize {
+        self.explore_sections
+            .get(self.explore_section_cursor)
+            .map(|s| s.items.len())
+            .unwrap_or(0)
     }
 }

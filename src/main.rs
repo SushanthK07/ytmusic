@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod cache;
 mod config;
 mod input;
 mod player;
@@ -8,7 +9,7 @@ mod ui;
 
 use anyhow::Result;
 use config::{KeyBindings, Theme};
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -34,18 +35,35 @@ async fn main() -> Result<()> {
     let keybindings = KeyBindings::from_config(&cfg.keybindings);
     let theme_name = cfg.theme.preset.clone();
     let volume = cfg.general.volume;
+    let gapless = cfg.general.gapless;
+    let cache_enabled = cfg.general.cache_enabled;
+    let cache_max = cfg.general.cache_max_size_mb;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run(&mut terminal, volume, theme, keybindings, theme_name).await;
+    let result = run(
+        &mut terminal,
+        volume,
+        theme,
+        keybindings,
+        theme_name,
+        gapless,
+        cache_enabled,
+        cache_max,
+    )
+    .await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(ref e) = result {
@@ -55,19 +73,33 @@ async fn main() -> Result<()> {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     volume: i32,
     theme: Theme,
     keybindings: KeyBindings,
     theme_name: String,
+    gapless: bool,
+    cache_enabled: bool,
+    cache_max: u64,
 ) -> Result<()> {
-    let mut app = app::App::new(volume, theme, keybindings, theme_name).await?;
+    let mut app = app::App::new(
+        volume,
+        theme,
+        keybindings,
+        theme_name,
+        gapless,
+        cache_enabled,
+        cache_max,
+    )
+    .await?;
     let mut events = EventStream::new();
     let tick_rate = std::time::Duration::from_millis(200);
 
     loop {
-        terminal.draw(|frame| ui::render(frame, &app, &app.theme))?;
+        let theme_clone = app.theme.clone();
+        terminal.draw(|frame| ui::render(frame, &mut app, &theme_clone))?;
 
         let timeout = tokio::time::sleep(tick_rate);
         tokio::pin!(timeout);
@@ -80,6 +112,9 @@ async fn run(
                             break;
                         }
                     }
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        input::handle_mouse(&mut app, mouse).await;
+                    }
                     Some(Ok(Event::Resize(_, _))) => {}
                     _ => {}
                 }
@@ -88,6 +123,7 @@ async fn run(
         }
 
         app.tick().await;
+        app.maybe_prefetch_next();
 
         if app.should_quit {
             break;
@@ -95,6 +131,7 @@ async fn run(
     }
 
     app.save_queue();
+    app.save_history();
     Ok(())
 }
 

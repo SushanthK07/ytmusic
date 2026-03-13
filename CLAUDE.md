@@ -15,19 +15,21 @@ A keyboard-driven terminal UI client for YouTube Music, built in Rust. Targets d
 - **YouTube Music data:** InnerTube API (`/youtubei/v1/search` with WEB_REMIX client context)
 - **Lyrics:** LRCLIB API (`lrclib.net/api/get`) — free, no auth, supports synced LRC format
 - **Config:** TOML via `toml` crate, stored at `~/.config/ytmusic/config.toml`
-- **Storage:** JSON via `serde_json`, stored at `~/.config/ytmusic/` (favorites, playlists, queue)
+- **Storage:** JSON via `serde_json`, stored at `~/.config/ytmusic/` (favorites, playlists, queue, history)
+- **Cache:** Audio files cached at `~/.cache/ytmusic/` with LRU eviction; background `yt-dlp` downloads
 
 ## Architecture
 
 ```
-main.rs        → terminal setup, event loop (tokio::select! over crossterm EventStream + tick timer)
-app.rs         → AppEvent enum, App struct (all state), tick() drains events + processes pending loads
-api.rs         → YtMusicClient (InnerTube POST requests + LRCLIB lyrics), deeply nested JSON response parsing
+main.rs        → terminal setup, event loop (tokio::select! over crossterm EventStream + tick timer), mouse capture
+app.rs         → AppEvent enum, App struct (all state), tick() drains events + processes pending loads + gapless prefetch
+api.rs         → YtMusicClient (InnerTube POST requests + LRCLIB lyrics + browse/explore), deeply nested JSON response parsing
 player.rs      → MpvProcess (subprocess + IPC), PlayerSender (Clone-able command channel), platform-conditional (cfg unix/windows)
-input.rs       → Mode-based key dispatch (Normal / Search), context handlers (Settings, Playlists, PlaylistPicker)
+input.rs       → Mode-based key dispatch (Normal / Search / Explore), context handlers (Settings, Playlists, PlaylistPicker), mouse handler
 config.rs      → TOML config loading/saving, Theme struct (12 presets + hex overrides), KeyBindings system (HashMap<Action, Vec<KeyBinding>>)
-storage.rs     → JSON persistence for favorites (HashSet<String>), playlists (Vec<Playlist>), queue (SavedQueue)
-ui/mod.rs      → ratatui immediate-mode rendering: library, search, queue, lyrics pane, home, favorites, playlists, settings, player bar, help overlay
+cache.rs       → AudioCache with CacheIndex (JSON at ~/.cache/ytmusic/), LRU eviction, lookup/register
+storage.rs     → JSON persistence for favorites (HashSet<String>), playlists (Vec<Playlist>), queue (SavedQueue), history (Vec<HistoryEntry>)
+ui/mod.rs      → ratatui immediate-mode rendering: library, search, queue, lyrics pane, home, favorites, playlists, history, explore, settings, player bar, help overlay, layout areas for mouse
 ui/theme.rs    → style helpers (title, selected, accent, dim, etc.) using Theme struct
 ```
 
@@ -38,8 +40,13 @@ ui/theme.rs    → style helpers (title, selected, accent, dim, etc.) using Them
 - pending_load pattern: track-end handler sets a URL, tick() sends it to mpv — avoids async in sync event handlers
 - Lyrics fetched from LRCLIB (free, no auth) via background tokio task; synced LRC timestamps parsed for real-time scrolling
 - Config is TOML at `~/.config/ytmusic/config.toml`; theme/volume also changeable in-app via Settings screen
-- All user data (favorites, playlists, queue) persisted as JSON in `~/.config/ytmusic/`
+- All user data (favorites, playlists, queue, history) persisted as JSON in `~/.config/ytmusic/`
 - Keybindings are data-driven: HashMap<Action, Vec<KeyBinding>> with TOML overrides merged on top of defaults
+- History persists play timestamps; capped at 500 entries; used for both History view and Home page "Recently Played"
+- Gapless playback via mpv's `loadfile append` — prefetches next track when within 10s of end
+- Offline cache downloads tracks via background `yt-dlp` after playback starts; LRU eviction keeps disk bounded
+- Mouse support via crossterm EnableMouseCapture; LayoutAreas stored for hit-testing clicks/scrolls
+- Explore view fetches InnerTube `/browse` endpoint; supports drill-down navigation with breadcrumb stack
 
 ## Distribution
 
@@ -57,9 +64,9 @@ Users need `mpv` and `yt-dlp` installed. The app checks at startup and prints in
 
 See `.context/competitor-analysis.md` for detailed comparison with ytermusic, youtui, ytui-music, and youtui-player.
 
-**Closed gaps:** config file, theming (12 presets), custom keybindings, in-app settings, favorites, playlists, persistent queue, lyrics (synced via LRCLIB), home page.
+**Closed gaps:** config file, theming (12 presets), custom keybindings, in-app settings, favorites, playlists, persistent queue, lyrics (synced via LRCLIB), home page, play history, explore/browse, offline caching, gapless playback, mouse support.
 
-**Remaining gaps:** offline caching, album art (terminal compatibility risk), media keys.
+**Remaining gaps:** album art (terminal compatibility risk), media keys (souvlaki crate, behind feature flag).
 
 ## Build
 

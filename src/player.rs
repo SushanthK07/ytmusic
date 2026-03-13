@@ -36,10 +36,12 @@ impl Default for PlayerStatus {
 #[allow(dead_code)]
 pub enum PlayerCommand {
     Load(String),
+    LoadAppend(String),
     TogglePause,
     Stop,
     SeekForward(f64),
     SeekBackward(f64),
+    SeekAbsolute(f64),
     SetVolume(i64),
     VolumeUp,
     VolumeDown,
@@ -69,6 +71,12 @@ impl PlayerSender {
                     escape_json_string(&url)
                 )
             }
+            PlayerCommand::LoadAppend(url) => {
+                format!(
+                    r#"{{"command":["loadfile","{}","append"]}}"#,
+                    escape_json_string(&url)
+                )
+            }
             PlayerCommand::TogglePause => r#"{"command":["cycle","pause"]}"#.to_string(),
             PlayerCommand::Stop => r#"{"command":["stop"]}"#.to_string(),
             PlayerCommand::SeekForward(secs) => {
@@ -76,6 +84,9 @@ impl PlayerSender {
             }
             PlayerCommand::SeekBackward(secs) => {
                 format!(r#"{{"command":["seek","-{}","relative"]}}"#, secs)
+            }
+            PlayerCommand::SeekAbsolute(pos) => {
+                format!(r#"{{"command":["seek","{}","absolute"]}}"#, pos)
             }
             PlayerCommand::SetVolume(vol) => {
                 format!(

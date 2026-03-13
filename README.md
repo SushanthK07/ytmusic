@@ -9,12 +9,13 @@ A keyboard-driven terminal UI client for YouTube Music, built in Rust.
 ```
 ╭─ ytmusic ─────────────────────────────────────────────────────────────╮
 │ ╭─ Library ────────╮ ╭─ Search ─────────────────────╮ ╭─ Lyrics ───╮ │
-│ │                  │ │  Search: radiohead            │ │            │ │
-│ │  > Home          │ │                               │ │ But I'm a  │ │
-│ │    Search        │ │  > Creep       Radiohead 3:58 │ │ creep      │ │
-│ │    Queue         │ │    Karma..     Radiohead 4:22 │ │ I'm a      │ │
+│ │  > Home          │ │  Search: radiohead            │ │            │ │
+│ │    Search        │ │                               │ │ But I'm a  │ │
+│ │    Explore       │ │  > Creep       Radiohead 3:58 │ │ creep      │ │
+│ │    History       │ │    Karma..     Radiohead 4:22 │ │ I'm a      │ │
 │ │    Favorites     │ │    No Sur..    Radiohead 3:49 │ │ weirdo     │ │
 │ │    Playlists     │ │    Every..     Radiohead 4:33 │ │            │ │
+│ │    Queue         │ │                               │ │            │ │
 │ │    Settings      │ │                               │ │            │ │
 │ ╰──────────────────╯ ╰──────────────────────────────╯ ╰────────────╯ │
 │  ▶ Creep — Radiohead                                  1:23 / 3:58   │
@@ -30,6 +31,11 @@ A keyboard-driven terminal UI client for YouTube Music, built in Rust.
 - **Favorites** — like/unlike tracks, persisted locally
 - **Playlists** — create, browse, and manage local playlists; add tracks from anywhere via picker overlay
 - **Persistent queue** — queue and now-playing state saved across sessions
+- **Play history** — tracks played are persisted with timestamps; browse and replay from History view
+- **Explore** — browse YouTube Music's curated content (trending, charts, moods, genres) with drill-down navigation
+- **Offline caching** — played tracks are background-downloaded and served from cache on replay; LRU eviction keeps disk usage bounded
+- **Gapless playback** — next track is pre-loaded into mpv near the end of the current track, eliminating gaps
+- **Mouse support** — click to select tracks, click progress bar to seek, scroll wheel to navigate lists
 - **12 theme presets** — tokyo-night, dracula, gruvbox, nord, rose-pine, kanagawa, everforest, one-dark, solarized, mocha, latte, and default
 - **Custom keybindings** — remap any action via TOML config
 - **In-app settings** — change theme and volume without leaving the TUI
@@ -185,6 +191,9 @@ ytmusic uses a TOML config file at `~/.config/ytmusic/config.toml` (auto-created
 ```toml
 [general]
 volume = 50
+gapless = true          # pre-load next track for seamless transitions
+cache_enabled = true    # background-download played tracks for offline replay
+cache_max_size_mb = 2048
 
 [theme]
 # Presets: "default", "tokyo-night", "dracula", "gruvbox", "nord",
@@ -211,31 +220,37 @@ All user data is stored in `~/.config/ytmusic/`:
 
 | File | Contents |
 |------|----------|
-| `config.toml` | Theme, volume, keybindings |
+| `config.toml` | Theme, volume, keybindings, gapless, cache settings |
 | `favorites.json` | Favorited track IDs |
 | `playlists.json` | Saved playlists with tracks |
 | `queue.json` | Queue and now-playing state |
+| `history.json` | Play history (last 500 tracks with timestamps) |
+
+Audio cache is stored at `~/.cache/ytmusic/` (macOS: `~/Library/Caches/ytmusic/`).
 
 ## Architecture
 
 ```
 src/
-├── main.rs        Entry point, terminal setup, dependency checks
+├── main.rs        Entry point, terminal setup, mouse capture, dependency checks
 ├── app.rs         Application state, event loop, business logic
-├── api.rs         YouTube Music InnerTube API + LRCLIB lyrics client
+├── api.rs         YouTube Music InnerTube API + LRCLIB lyrics + browse/explore
 ├── player.rs      mpv IPC (JSON over Unix socket / named pipe)
-├── input.rs       Keyboard input handling (Normal / Search modes)
+├── input.rs       Keyboard + mouse input handling (Normal / Search / Explore modes)
 ├── config.rs      TOML config, theme presets, keybinding system
-├── storage.rs     JSON persistence (favorites, playlists, queue)
+├── cache.rs       Audio cache with LRU eviction (background yt-dlp downloads)
+├── storage.rs     JSON persistence (favorites, playlists, queue, history)
 └── ui/
-    ├── mod.rs     Layout and widget rendering
+    ├── mod.rs     Layout and widget rendering (history, explore, mouse areas)
     └── theme.rs   Style helpers
 ```
 
-- **Event loop** — `tokio::select!` multiplexes terminal input, player events from mpv, API responses, and a tick timer
+- **Event loop** — `tokio::select!` multiplexes terminal input (keyboard + mouse), player events from mpv, API responses, and a tick timer
 - **Search** — Hits YouTube Music's InnerTube API in a background tokio task; results arrive without blocking the UI
 - **Playback** — Controls mpv via JSON IPC over a Unix socket (macOS/Linux) or named pipe (Windows); mpv handles yt-dlp integration internally
 - **Lyrics** — Fetched from LRCLIB (free, no auth); supports synced (LRC) and plain text; displayed as a real-time scrolling pane
+- **Caching** — Background `yt-dlp` download after playback starts; LRU eviction when cache exceeds configured max size
+- **Gapless** — Pre-loads next track via mpv's `loadfile append` when within 10s of track end
 
 ## Building from source
 

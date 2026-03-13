@@ -1,6 +1,6 @@
 use crate::app::{App, LibraryItem, Mode, Panel, PlaylistMode, SettingsSection};
 use crate::config::Action;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 pub async fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     match app.mode {
@@ -25,6 +25,10 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
 
     if app.active_panel == Panel::Content && app.selected_library_item() == LibraryItem::Playlists {
         return handle_playlists(app, key).await;
+    }
+
+    if app.active_panel == Panel::Content && app.selected_library_item() == LibraryItem::Explore {
+        return handle_explore(app, key).await;
     }
 
     let code = &key.code;
@@ -62,6 +66,14 @@ async fn handle_normal(app: &mut App, key: KeyEvent) -> bool {
                 LibraryItem::Home => app.active_panel = Panel::Content,
                 LibraryItem::Settings => app.active_panel = Panel::Content,
                 LibraryItem::Favorites => app.active_panel = Panel::Content,
+                LibraryItem::History => {
+                    app.active_panel = Panel::Content;
+                    app.history_cursor = 0;
+                }
+                LibraryItem::Explore => {
+                    app.active_panel = Panel::Content;
+                    app.load_explore();
+                }
                 LibraryItem::Playlists => {
                     app.active_panel = Panel::Content;
                     app.playlist_mode = PlaylistMode::List;
@@ -246,6 +258,41 @@ async fn handle_search(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
+async fn handle_explore(app: &mut App, key: KeyEvent) -> bool {
+    let code = &key.code;
+    let mods = &key.modifiers;
+    let bindings = app.keybindings.clone();
+
+    if bindings.matches(Action::Quit, code, mods) {
+        app.save_queue();
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => app.move_cursor_down(),
+        KeyCode::Char('k') | KeyCode::Up => app.move_cursor_up(),
+        KeyCode::Char('g') => app.move_cursor_top(),
+        KeyCode::Char('G') => app.move_cursor_bottom(),
+        KeyCode::Enter => app.play_selected().await,
+        KeyCode::Esc => {
+            if !app.explore_depth.is_empty() {
+                app.browse_back();
+            } else {
+                app.prev_panel();
+            }
+        }
+        KeyCode::Char('h') | KeyCode::Left => app.prev_panel(),
+        KeyCode::Char('l') | KeyCode::Right => app.next_panel(),
+        KeyCode::Char('/') => app.enter_search(),
+        KeyCode::Char('f') => app.toggle_favorite(),
+        KeyCode::Char(' ') => app.toggle_pause().await,
+        KeyCode::Char('?') => app.show_help = true,
+        _ => {}
+    }
+
+    false
+}
+
 async fn handle_playlists(app: &mut App, key: KeyEvent) -> bool {
     let code = &key.code;
     let mods = &key.modifiers;
@@ -324,4 +371,65 @@ async fn handle_playlists(app: &mut App, key: KeyEvent) -> bool {
     }
 
     false
+}
+
+pub async fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    let col = mouse.column;
+    let row = mouse.row;
+
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let areas = app.layout_areas.clone();
+
+            if contains(areas.progress_bar, col, row) {
+                let bar_width = areas.progress_bar.width as f64;
+                if bar_width > 0.0 && app.player_status.duration > 0.0 {
+                    let click_x = (col - areas.progress_bar.x) as f64;
+                    let ratio = click_x / bar_width;
+                    let pos = ratio * app.player_status.duration;
+                    app.seek_to(pos).await;
+                }
+                return;
+            }
+
+            if contains(areas.library, col, row) {
+                app.active_panel = Panel::Library;
+                let inner_y = (row - areas.library.y).saturating_sub(1) as usize;
+                if inner_y < LibraryItem::ALL.len() {
+                    app.library_cursor = inner_y;
+                }
+            } else if contains(areas.content, col, row) {
+                app.active_panel = Panel::Content;
+            } else if contains(areas.queue, col, row) {
+                app.active_panel = Panel::Queue;
+                let inner_y = (row - areas.queue.y).saturating_sub(1) as usize;
+                if !app.queue.is_empty() && inner_y < app.queue.len() {
+                    app.queue_cursor = inner_y;
+                }
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            let areas = app.layout_areas.clone();
+            if contains(areas.content, col, row)
+                || contains(areas.library, col, row)
+                || contains(areas.queue, col, row)
+            {
+                app.move_cursor_down();
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            let areas = app.layout_areas.clone();
+            if contains(areas.content, col, row)
+                || contains(areas.library, col, row)
+                || contains(areas.queue, col, row)
+            {
+                app.move_cursor_up();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }

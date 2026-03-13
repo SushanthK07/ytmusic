@@ -11,7 +11,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-pub fn render(frame: &mut Frame, app: &App, t: &Theme) {
+pub fn render(frame: &mut Frame, app: &mut App, t: &Theme) {
     let area = frame.area();
 
     let outer = Layout::default()
@@ -28,6 +28,15 @@ pub fn render(frame: &mut Frame, app: &App, t: &Theme) {
     render_main(frame, outer[1], app, t);
     render_player_bar(frame, outer[2], app, t);
     render_status_bar(frame, outer[3], app, t);
+
+    app.layout_areas.player_bar = outer[2];
+    let gauge_area = Rect {
+        x: outer[2].x + 2,
+        width: outer[2].width.saturating_sub(4),
+        y: outer[2].y + 2,
+        height: 1,
+    };
+    app.layout_areas.progress_bar = gauge_area;
 
     if app.show_playlist_picker {
         render_playlist_picker(frame, area, app, t);
@@ -59,7 +68,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     frame.render_widget(Paragraph::new(header), area);
 }
 
-fn render_main(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
+fn render_main(frame: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let constraints = if app.show_lyrics {
         vec![
             Constraint::Length(20),
@@ -77,8 +86,17 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(4)])
+        .constraints([Constraint::Length(11), Constraint::Min(4)])
         .split(main_layout[0]);
+
+    app.layout_areas.library = left[0];
+    app.layout_areas.queue = left[1];
+    app.layout_areas.content = main_layout[1];
+    app.layout_areas.lyrics = if app.show_lyrics {
+        Some(main_layout[2])
+    } else {
+        None
+    };
 
     render_library(frame, left[0], app, t);
     render_queue_panel(frame, left[1], app, t);
@@ -188,6 +206,14 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
         }
         LibraryItem::Playlists => {
             render_playlists(frame, area, app, border_style, t);
+            return;
+        }
+        LibraryItem::History => {
+            render_history(frame, area, app, border_style, t);
+            return;
+        }
+        LibraryItem::Explore => {
+            render_explore(frame, area, app, border_style, t);
             return;
         }
         _ => {}
@@ -321,7 +347,10 @@ fn render_search_results(frame: &mut Frame, area: Rect, app: &App, border_style:
                 ),
                 Span::styled(format!(" {:>6}", duration), theme::dim(t)),
                 Span::styled(format!(" {}", fav_icon), Style::default().fg(t.accent)),
-                Span::styled(format!(" {} ", playing_icon), Style::default().fg(t.playing_indicator)),
+                Span::styled(
+                    format!(" {} ", playing_icon),
+                    Style::default().fg(t.playing_indicator),
+                ),
             ]);
 
             ListItem::new(line)
@@ -406,19 +435,19 @@ fn render_home(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t:
         let artist_col = inner_width.saturating_sub(6) / 3;
         let title_col = inner_width.saturating_sub(artist_col + 6);
 
-        for track in app.history.iter().rev().take(8) {
+        for entry in app.history.iter().rev().take(8) {
             history_lines.push(Line::from(vec![
                 Span::styled("  ♫ ", Style::default().fg(t.accent_dim)),
                 Span::styled(
                     format!(
                         "{:<width$}",
-                        truncate(&track.title, title_col),
+                        truncate(&entry.track.title, title_col),
                         width = title_col
                     ),
                     Style::default().fg(t.text),
                 ),
                 Span::styled(
-                    format!(" {}", truncate(&track.artist, artist_col)),
+                    format!(" {}", truncate(&entry.track.artist, artist_col)),
                     theme::secondary(t),
                 ),
             ]));
@@ -681,6 +710,213 @@ fn render_playlists(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
     }
 }
 
+fn render_history(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
+    let title = format!(" History ({}) ", app.history.len());
+    let block = Block::default()
+        .title(title)
+        .title_style(theme::title(t))
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .padding(Padding::horizontal(1));
+
+    if app.history.is_empty() {
+        let empty = Paragraph::new(Span::styled(
+            "  No history yet — play a track to start",
+            theme::dim(t),
+        ))
+        .block(block);
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let inner_width = area.width.saturating_sub(4) as usize;
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total = app.history.len();
+    let offset = scroll_offset(app.history_cursor, visible_height, total);
+
+    let time_col = 10;
+    let artist_col = inner_width.saturating_sub(time_col + 12) / 3;
+    let title_col = inner_width.saturating_sub(artist_col + time_col + 12);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let now_playing_id = app.now_playing.as_ref().map(|tr| tr.video_id.as_str());
+
+    let items: Vec<ListItem> = (0..total)
+        .rev()
+        .enumerate()
+        .skip(offset)
+        .take(visible_height)
+        .map(|(display_idx, rev_idx)| {
+            let entry = &app.history[rev_idx];
+            let is_selected = display_idx == app.history_cursor;
+            let is_playing = now_playing_id == Some(&entry.track.video_id);
+            let marker = if is_selected { ">" } else { " " };
+
+            let ago = format_relative_time(now.saturating_sub(entry.played_at));
+
+            let line = Line::from(vec![
+                Span::raw(format!(" {} ", marker)),
+                Span::styled(
+                    format!(
+                        "{:<width$}",
+                        truncate(&entry.track.title, title_col),
+                        width = title_col
+                    ),
+                    if is_playing {
+                        Style::default()
+                            .fg(t.playing_indicator)
+                            .add_modifier(Modifier::BOLD)
+                    } else if is_selected {
+                        theme::selected(t)
+                    } else {
+                        Style::default().fg(t.text)
+                    },
+                ),
+                Span::styled(
+                    format!(
+                        " {:<width$}",
+                        truncate(&entry.track.artist, artist_col),
+                        width = artist_col
+                    ),
+                    theme::secondary(t),
+                ),
+                Span::styled(format!(" {:>10} ", ago), theme::dim(t)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
+}
+
+fn render_explore(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
+    let block = Block::default()
+        .title(" Explore ")
+        .title_style(theme::title(t))
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .padding(Padding::horizontal(1));
+
+    if app.explore_loading {
+        let loading = Paragraph::new(Span::styled("  Loading...", theme::dim(t))).block(block);
+        frame.render_widget(loading, area);
+        return;
+    }
+
+    if app.explore_sections.is_empty() {
+        let msg = if app.explore_loaded {
+            "  No content available"
+        } else {
+            "  Loading explore..."
+        };
+        let empty = Paragraph::new(Span::styled(msg, theme::dim(t))).block(block);
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let inner_width = inner.width.saturating_sub(2) as usize;
+    let visible_height = inner.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (si, section) in app.explore_sections.iter().enumerate() {
+        let is_active_section = si == app.explore_section_cursor;
+        let header_style = if is_active_section {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            theme::secondary(t)
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {}", section.title),
+            header_style,
+        )));
+        lines.push(Line::from(""));
+
+        for (ii, item) in section.items.iter().enumerate() {
+            let is_selected = is_active_section && ii == app.explore_item_cursor;
+            let marker = if is_selected { ">" } else { " " };
+
+            let (label, detail) = match item {
+                crate::api::BrowseItem::Track(track) => (
+                    truncate(&track.title, inner_width / 2),
+                    track.artist.clone(),
+                ),
+                crate::api::BrowseItem::PlaylistCard {
+                    title, subtitle, ..
+                } => (truncate(title, inner_width / 2), subtitle.clone()),
+                crate::api::BrowseItem::Category { title, .. } => {
+                    (truncate(title, inner_width / 2), String::new())
+                }
+            };
+
+            let style = if is_selected {
+                theme::selected(t)
+            } else {
+                Style::default().fg(t.text)
+            };
+
+            let title_w = inner_width / 2;
+            let detail_w = inner_width.saturating_sub(title_w + 4);
+
+            lines.push(Line::from(vec![
+                Span::raw(format!(" {} ", marker)),
+                Span::styled(format!("{:<width$}", label, width = title_w), style),
+                Span::styled(
+                    format!(" {}", truncate(&detail, detail_w)),
+                    theme::secondary(t),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+    }
+
+    let total_lines = lines.len();
+    let scroll = if total_lines > visible_height {
+        let target = lines
+            .iter()
+            .take(total_lines)
+            .enumerate()
+            .filter(|(_, l)| {
+                l.spans
+                    .first()
+                    .map(|s| s.content.starts_with(" >"))
+                    .unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .next()
+            .unwrap_or(0);
+        target.saturating_sub(visible_height / 3)
+    } else {
+        0
+    };
+
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(visible_height)
+        .collect();
+    frame.render_widget(Paragraph::new(visible_lines), inner);
+}
+
+fn format_relative_time(secs: u64) -> String {
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
 fn render_settings(frame: &mut Frame, area: Rect, app: &App, border_style: Style, t: &Theme) {
     let block = Block::default()
         .title(" Settings ")
@@ -804,7 +1040,11 @@ fn render_player_bar(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let now_playing = Line::from(vec![
         Span::styled(format!("  {} ", icon), theme::accent(t)),
         Span::styled(
-            format!("{:<width$}", truncate(&title_line, title_width), width = title_width),
+            format!(
+                "{:<width$}",
+                truncate(&title_line, title_width),
+                width = title_width
+            ),
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(

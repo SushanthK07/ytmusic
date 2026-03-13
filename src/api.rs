@@ -84,6 +84,28 @@ impl YtMusicClient {
         Ok(parse_search_results(&resp))
     }
 
+    pub async fn browse(&self, browse_id: &str) -> Result<Vec<BrowseSection>> {
+        let mut body = self.context_body();
+        body["browseId"] = Value::String(browse_id.to_string());
+
+        let resp = self
+            .http
+            .post(format!(
+                "{}/browse?key={}&prettyPrint=false",
+                INNERTUBE_URL, API_KEY
+            ))
+            .header("Content-Type", "application/json")
+            .header("Origin", "https://music.youtube.com")
+            .header("Referer", "https://music.youtube.com/")
+            .json(&body)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+
+        Ok(parse_browse_response(&resp))
+    }
+
     #[allow(dead_code)]
     pub async fn get_suggestions(&self, query: &str) -> Result<Vec<String>> {
         let mut body = self.context_body();
@@ -447,4 +469,273 @@ fn extract_runs_text(runs: &Value) -> Option<String> {
     } else {
         Some(text)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct BrowseSection {
+    pub title: String,
+    pub items: Vec<BrowseItem>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum BrowseItem {
+    Track(Track),
+    PlaylistCard {
+        title: String,
+        subtitle: String,
+        browse_id: String,
+        thumbnail_url: Option<String>,
+    },
+    Category {
+        title: String,
+        browse_id: String,
+        params: Option<String>,
+    },
+}
+
+fn parse_browse_response(data: &Value) -> Vec<BrowseSection> {
+    let mut sections = Vec::new();
+
+    let tab_contents = traverse(
+        data,
+        &["contents", "singleColumnBrowseResultsRenderer", "tabs"],
+    )
+    .and_then(|t| t.as_array())
+    .and_then(|tabs| tabs.first())
+    .and_then(|tab| {
+        traverse(
+            tab,
+            &["tabRenderer", "content", "sectionListRenderer", "contents"],
+        )
+    })
+    .and_then(|c| c.as_array());
+
+    let contents = match tab_contents {
+        Some(c) => c,
+        None => return sections,
+    };
+
+    for section in contents {
+        if let Some(carousel) = section.get("musicCarouselShelfRenderer") {
+            if let Some(s) = parse_carousel_section(carousel) {
+                sections.push(s);
+            }
+        } else if let Some(grid) = section.get("gridRenderer") {
+            if let Some(s) = parse_grid_section(grid) {
+                sections.push(s);
+            }
+        } else if let Some(shelf) = section.get("musicShelfRenderer") {
+            if let Some(s) = parse_music_shelf_as_browse(shelf) {
+                sections.push(s);
+            }
+        }
+
+        if let Some(immersive) = section.get("musicImmersiveCarouselShelfRenderer") {
+            if let Some(s) = parse_carousel_section(immersive) {
+                sections.push(s);
+            }
+        }
+    }
+
+    sections
+}
+
+fn parse_carousel_section(carousel: &Value) -> Option<BrowseSection> {
+    let title = carousel
+        .get("header")
+        .and_then(|h| {
+            h.get("musicCarouselShelfBasicHeaderRenderer")
+                .or(h.get("musicImmersiveCarouselShelfBasicHeaderRenderer"))
+        })
+        .and_then(|hdr| hdr.get("title"))
+        .and_then(|t| {
+            t.get("runs").and_then(extract_runs_text).or(t
+                .get("simpleText")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "Untitled".to_string());
+
+    let contents = carousel.get("contents")?.as_array()?;
+    let mut items = Vec::new();
+
+    for item in contents {
+        if let Some(two_row) = item.get("musicTwoRowItemRenderer") {
+            if let Some(browse_item) = parse_two_row_item(two_row) {
+                items.push(browse_item);
+            }
+        } else if let Some(responsive) = item.get("musicResponsiveListItemRenderer") {
+            if let Some(track) = parse_track_item(item) {
+                items.push(BrowseItem::Track(track));
+            } else if let Some(card) = parse_responsive_as_card(responsive) {
+                items.push(card);
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(BrowseSection { title, items })
+}
+
+fn parse_grid_section(grid: &Value) -> Option<BrowseSection> {
+    let title = grid
+        .get("header")
+        .and_then(|h| h.get("gridHeaderRenderer"))
+        .and_then(|hdr| hdr.get("title"))
+        .and_then(|t| t.get("runs").and_then(extract_runs_text))
+        .unwrap_or_else(|| "Browse".to_string());
+
+    let items_arr = grid.get("items")?.as_array()?;
+    let mut items = Vec::new();
+
+    for item in items_arr {
+        if let Some(nav) = item.get("musicNavigationButtonRenderer") {
+            let btn_title = nav
+                .get("buttonText")
+                .and_then(|t| t.get("runs").and_then(extract_runs_text))
+                .unwrap_or_default();
+            let browse_id = traverse(nav, &["clickCommand", "browseEndpoint", "browseId"])
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let params = traverse(nav, &["clickCommand", "browseEndpoint", "params"])
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if !btn_title.is_empty() {
+                items.push(BrowseItem::Category {
+                    title: btn_title,
+                    browse_id,
+                    params,
+                });
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(BrowseSection { title, items })
+}
+
+fn parse_music_shelf_as_browse(shelf: &Value) -> Option<BrowseSection> {
+    let title = shelf
+        .get("title")
+        .and_then(|t| t.get("runs").and_then(extract_runs_text))
+        .unwrap_or_else(|| "Tracks".to_string());
+
+    let contents = shelf.get("contents")?.as_array()?;
+    let mut items = Vec::new();
+    for item in contents {
+        if let Some(track) = parse_track_item(item) {
+            items.push(BrowseItem::Track(track));
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(BrowseSection { title, items })
+}
+
+fn parse_two_row_item(renderer: &Value) -> Option<BrowseItem> {
+    let title = renderer
+        .get("title")
+        .and_then(|t| t.get("runs").and_then(extract_runs_text))
+        .unwrap_or_default();
+
+    let subtitle = renderer
+        .get("subtitle")
+        .and_then(|t| t.get("runs").and_then(extract_runs_text))
+        .unwrap_or_default();
+
+    let thumbnail_url = traverse(
+        renderer,
+        &[
+            "thumbnailRenderer",
+            "musicThumbnailRenderer",
+            "thumbnail",
+            "thumbnails",
+        ],
+    )
+    .and_then(|t| t.as_array())
+    .and_then(|arr| arr.last())
+    .and_then(|t| t.get("url"))
+    .and_then(|u| u.as_str())
+    .map(|s| s.to_string());
+
+    let browse_id = traverse(
+        renderer,
+        &["navigationEndpoint", "browseEndpoint", "browseId"],
+    )
+    .and_then(|v| v.as_str());
+
+    let video_id = traverse(
+        renderer,
+        &["navigationEndpoint", "watchEndpoint", "videoId"],
+    )
+    .and_then(|v| v.as_str());
+
+    if let Some(vid) = video_id {
+        Some(BrowseItem::Track(Track {
+            video_id: vid.to_string(),
+            title,
+            artist: subtitle,
+            album: None,
+            duration_text: None,
+            thumbnail_url,
+            is_explicit: false,
+        }))
+    } else {
+        browse_id.map(|bid| BrowseItem::PlaylistCard {
+            title,
+            subtitle,
+            browse_id: bid.to_string(),
+            thumbnail_url,
+        })
+    }
+}
+
+fn parse_responsive_as_card(renderer: &Value) -> Option<BrowseItem> {
+    let browse_id = traverse(
+        renderer,
+        &["navigationEndpoint", "browseEndpoint", "browseId"],
+    )
+    .and_then(|v| v.as_str())?;
+
+    let columns = renderer.get("flexColumns")?.as_array()?;
+    let title = columns
+        .first()
+        .and_then(|c| {
+            traverse(
+                c,
+                &["musicResponsiveListItemFlexColumnRenderer", "text", "runs"],
+            )
+        })
+        .and_then(extract_runs_text)
+        .unwrap_or_default();
+
+    let subtitle = columns
+        .get(1)
+        .and_then(|c| {
+            traverse(
+                c,
+                &["musicResponsiveListItemFlexColumnRenderer", "text", "runs"],
+            )
+        })
+        .and_then(extract_runs_text)
+        .unwrap_or_default();
+
+    Some(BrowseItem::PlaylistCard {
+        title,
+        subtitle,
+        browse_id: browse_id.to_string(),
+        thumbnail_url: None,
+    })
 }

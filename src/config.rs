@@ -17,11 +17,19 @@ pub struct ConfigFile {
 #[serde(default)]
 pub struct GeneralConfig {
     pub volume: i32,
+    pub gapless: bool,
+    pub cache_enabled: bool,
+    pub cache_max_size_mb: u64,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        Self { volume: 50 }
+        Self {
+            volume: 50,
+            gapless: true,
+            cache_enabled: true,
+            cache_max_size_mb: 2048,
+        }
     }
 }
 
@@ -624,6 +632,9 @@ const DEFAULT_CONFIG: &str = r##"# ytmusic configuration
 
 [general]
 volume = 50
+gapless = true
+cache_enabled = true
+cache_max_size_mb = 2048
 
 [theme]
 # Preset: "default", "tokyo-night", "dracula", "gruvbox", "nord",
